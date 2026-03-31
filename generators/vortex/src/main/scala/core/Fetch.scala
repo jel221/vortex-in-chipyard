@@ -1,0 +1,151 @@
+// Copyright © 2019-2023
+// Licensed under the Apache License, Version 2.0
+// Translated from VX_fetch.sv
+
+package vortex
+
+import chisel3._
+import chisel3.util._
+
+import VortexGPUPkg._
+import VortexConfigConstants._
+
+/** Instruction Fetch unit.
+ *  Mirrors VX_fetch.sv.
+ *  Converts scheduled warp PC into an I-cache request and reassembles the
+ *  response into a FetchDataBundle for the decode stage.
+ */
+class VxFetch extends Module {
+  // Derived widths (matching VX_define / VX_gpu_pkg defaults)
+  private val icacheWordSize  = L1_LINE_SIZE   // bytes
+  private val icacheAddrW     = MEM_ADDR_WIDTH - log2Ceil(icacheWordSize)
+  private val icacheTagW      = UUID_WIDTH + NW_WIDTH
+
+  val io = IO(new Bundle {
+    // I-cache bus
+    val icache_req_valid  = Output(Bool())
+    val icache_req_ready  = Input(Bool())
+    val icache_req_addr   = Output(UInt(icacheAddrW.W))
+    val icache_req_tag    = Output(UInt(icacheTagW.W))
+    val icache_req_rw     = Output(Bool())
+    val icache_req_byteen = Output(UInt(icacheWordSize.W))
+    val icache_req_data   = Output(UInt((icacheWordSize * 8).W))
+    val icache_req_flags  = Output(UInt(MEM_FLAGS_WIDTH.W))
+    val icache_rsp_valid  = Input(Bool())
+    val icache_rsp_ready  = Output(Bool())
+    val icache_rsp_tag    = Input(UInt(icacheTagW.W))
+    val icache_rsp_data   = Input(UInt((icacheWordSize * 8).W))
+
+    // Schedule interface (slave)
+    val schedule_valid = Input(Bool())
+    val schedule_ready = Output(Bool())
+    val schedule_wid   = Input(UInt(NW_WIDTH.W))
+    val schedule_tmask = Input(UInt(NUM_THREADS.W))
+    val schedule_PC    = Input(UInt(PC_BITS.W))
+    val schedule_uuid  = Input(UInt(UUID_WIDTH.W))
+
+    // Fetch output (master)
+    val fetch_valid = Output(Bool())
+    val fetch_ready = Input(Bool())
+    val fetch_wid   = Output(UInt(NW_WIDTH.W))
+    val fetch_tmask = Output(UInt(NUM_THREADS.W))
+    val fetch_PC    = Output(UInt(PC_BITS.W))
+    val fetch_instr = Output(UInt(32.W))
+    val fetch_uuid  = Output(UInt(UUID_WIDTH.W))
+
+    // ibuf_pop sideband (for non-L1 path)
+    val ibuf_pop = Input(UInt(NUM_WARPS.W))
+  })
+
+  // -------------------------------------------------------------------------
+  // Tag store: maps NW_WIDTH warp-ID → {PC, tmask} for in-flight requests
+  // -------------------------------------------------------------------------
+  val tagMem = SyncReadMem(NUM_WARPS, UInt((PC_BITS + NUM_THREADS).W))
+
+  val reqTag  = io.schedule_wid
+  val icacheReqFire = Wire(Bool())
+
+  // Write on every I-cache request fire
+  when (icacheReqFire) {
+    tagMem.write(reqTag, Cat(io.schedule_PC, io.schedule_tmask))
+  }
+
+  // Split incoming response tag into UUID and warp-ID
+  val rspUuid = io.icache_rsp_tag(icacheTagW - 1, NW_WIDTH)
+  val rspTag  = io.icache_rsp_tag(NW_WIDTH - 1, 0)
+
+  val rspData = tagMem.read(rspTag, io.icache_rsp_valid)
+  val rspPC    = rspData(PC_BITS + NUM_THREADS - 1, NUM_THREADS)
+  val rspTmask = rspData(NUM_THREADS - 1, 0)
+
+  // -------------------------------------------------------------------------
+  // Pending ibuffer tracking (no-L1 path)
+  // -------------------------------------------------------------------------
+  val pendingIbufFull = Wire(Vec(NUM_WARPS, Bool()))
+  for (i <- 0 until NUM_WARPS) {
+    val pendingCnt = RegInit(0.U(log2Ceil(IBUF_SIZE + 1).W))
+    val incr = icacheReqFire && (io.schedule_wid === i.U)
+    val decr = io.ibuf_pop(i)
+    when (incr && !decr) { pendingCnt := pendingCnt + 1.U }
+    .elsewhen (!incr && decr) { pendingCnt := pendingCnt - 1.U }
+    pendingIbufFull(i) := (pendingCnt === IBUF_SIZE.U)
+  }
+  val ibufReady = !pendingIbufFull(io.schedule_wid)
+
+  // -------------------------------------------------------------------------
+  // I-cache request
+  // -------------------------------------------------------------------------
+  val icacheReqValid = io.schedule_valid && ibufReady
+
+  // PC to I-cache address: word-aligned, strip low bits
+  // 4-byte aligned → shift by 2; then take icacheAddrW bits
+  val icacheReqAddr = io.schedule_PC(PC_BITS - 1, log2Ceil(icacheWordSize))
+  val icacheReqTag  = Cat(io.schedule_uuid, reqTag)
+
+  icacheReqFire := icacheReqValid && io.icache_req_ready
+
+  io.schedule_ready := io.icache_req_ready && ibufReady
+
+  // Output register (elastic buffer size=2, out_reg=1)
+  val reqValidReg  = RegInit(false.B)
+  val reqAddrReg   = Reg(UInt(icacheAddrW.W))
+  val reqTagReg    = Reg(UInt(icacheTagW.W))
+
+  // Simple 2-entry elastic buffer
+  val bufFull = RegInit(false.B)
+  val buf2Valid = RegInit(false.B)
+  val buf2Addr  = Reg(UInt(icacheAddrW.W))
+  val buf2Tag   = Reg(UInt(icacheTagW.W))
+
+  // Simple output register
+  val outValid = RegInit(false.B)
+  val outAddr  = Reg(UInt(icacheAddrW.W))
+  val outTag   = Reg(UInt(icacheTagW.W))
+
+  val outFire = outValid && io.icache_req_ready
+
+  when (outFire || !outValid) {
+    outValid := icacheReqValid
+    outAddr  := icacheReqAddr
+    outTag   := icacheReqTag
+  }
+
+  io.icache_req_valid  := outValid
+  io.icache_req_addr   := outAddr
+  io.icache_req_tag    := outTag
+  io.icache_req_rw     := false.B
+  io.icache_req_byteen := Fill(icacheWordSize, 1.U(1.W))
+  io.icache_req_data   := 0.U
+  io.icache_req_flags  := 0.U
+
+  // -------------------------------------------------------------------------
+  // I-cache response → fetch output
+  // -------------------------------------------------------------------------
+  io.fetch_valid := io.icache_rsp_valid
+  io.fetch_wid   := rspTag
+  io.fetch_tmask := rspTmask
+  io.fetch_PC    := rspPC
+  io.fetch_instr := io.icache_rsp_data(31, 0)
+  io.fetch_uuid  := rspUuid
+  io.icache_rsp_ready := io.fetch_ready
+}
