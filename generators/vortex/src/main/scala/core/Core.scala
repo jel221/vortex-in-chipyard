@@ -32,10 +32,9 @@ class VxCore(val coreId: Int = 0, val instanceId: String = "") extends Module {
   private val numDispatch = NUM_EX_UNITS * ISSUE_WIDTH
 
   val io = IO(new Bundle {
-    // DCR bus (slave)
-    val dcr_write_valid = Input(Bool())
-    val dcr_write_addr  = Input(UInt(VX_DCR_ADDR_WIDTH.W))
-    val dcr_write_data  = Input(UInt(32.W))
+    // Direct from RoCC (same pattern as startup_addr)
+    val startup_addr = Input(UInt(XLEN.W))
+    val mpm_class    = Input(UInt(8.W))
 
     // D-cache bus (DCACHE_NUM_REQS master ports)
     val dcache_req_valid  = Output(Vec(DCACHE_NUM_REQS, Bool()))
@@ -204,8 +203,6 @@ class VxCore(val coreId: Int = 0, val instanceId: String = "") extends Module {
   // commit → CSR
   val commit_csr_instret = Wire(UInt(PERF_CTR_BITS.W))
 
-  // DCR → execute
-  val base_dcrs = Wire(new BaseDcrsBundle)
 
   // LSU ↔ mem_unit
   val lsu_req_valid  = Wire(Vec(NUM_LSU_BLOCKS, Bool()))
@@ -224,19 +221,10 @@ class VxCore(val coreId: Int = 0, val instanceId: String = "") extends Module {
   val lsu_rsp_tag    = Wire(Vec(NUM_LSU_BLOCKS, UInt(LSU_TAG_WIDTH.W)))
 
   // -------------------------------------------------------------------------
-  // VX_dcr_data
-  // -------------------------------------------------------------------------
-  val dcrData = Module(new VxDcrDataBB)
-  dcrData.io.dcr_write_valid := io.dcr_write_valid
-  dcrData.io.dcr_write_addr  := io.dcr_write_addr
-  dcrData.io.dcr_write_data  := io.dcr_write_data
-  base_dcrs                  := dcrData.io.base_dcrs
-
-  // -------------------------------------------------------------------------
   // VX_schedule
   // -------------------------------------------------------------------------
   val schedule = Module(new VxScheduleBB(instanceId + "-schedule", coreId))
-  schedule.io.base_dcrs          := base_dcrs
+  schedule.io.startup_addr          := io.startup_addr
   schedule.io.warp_ctl_valid     := warp_ctl_valid
   schedule.io.warp_ctl_wid       := warp_ctl_wid
   schedule.io.warp_ctl_tmc_valid := warp_ctl_tmc_valid
@@ -295,8 +283,6 @@ class VxCore(val coreId: Int = 0, val instanceId: String = "") extends Module {
   fetch.io.schedule_wid   := sched_wid
   fetch.io.schedule_tmask := sched_tmask
   fetch.io.schedule_PC    := sched_PC
-  // ibuf_pop (non-L1 path) not used in default L1-enabled config
-  fetch.io.ibuf_pop       := 0.U
 
   io.icache_req_valid  := fetch.io.icache_req_valid
   fetch.io.icache_req_ready := io.icache_req_ready
@@ -410,7 +396,6 @@ class VxCore(val coreId: Int = 0, val instanceId: String = "") extends Module {
   // VX_execute
   // -------------------------------------------------------------------------
   val execute = Module(new VxExecute(instanceId + "-execute", coreId))
-  execute.io.base_dcrs := base_dcrs
   for (i <- 0 until numDispatch) {
     execute.io.dispatch_valid(i)    := dispatch_valid(i)
     dispatch_ready(i)               := execute.io.dispatch_ready(i)
@@ -449,6 +434,7 @@ class VxCore(val coreId: Int = 0, val instanceId: String = "") extends Module {
   sched_csr_unlock_wid               := execute.io.sched_csr_unlock_wid
   sched_csr_unlock_warp              := execute.io.sched_csr_unlock_warp
   execute.io.commit_csr_instret      := commit_csr_instret
+  execute.io.mpm_class               := io.mpm_class
   warp_ctl_valid           := execute.io.warp_ctl_valid
   warp_ctl_wid             := execute.io.warp_ctl_wid
   warp_ctl_tmc_valid       := execute.io.warp_ctl_tmc_valid
@@ -566,31 +552,13 @@ class VxCore(val coreId: Int = 0, val instanceId: String = "") extends Module {
 // BlackBox stubs for modules not yet translated
 // ---------------------------------------------------------------------------
 
-class VxDcrDataBB extends Module {
-  import VortexGPUPkg._
-  import VortexConfigConstants._
-  val io = IO(new Bundle {
-    val dcr_write_valid = Input(Bool())
-    val dcr_write_addr  = Input(UInt(VX_DCR_ADDR_WIDTH.W))
-    val dcr_write_data  = Input(UInt(32.W))
-    val base_dcrs       = Output(new BaseDcrsBundle)
-  })
-  val inner = Module(new DcrData)
-  inner.io.dcr_write_valid := io.dcr_write_valid
-  inner.io.dcr_write_addr  := io.dcr_write_addr
-  inner.io.dcr_write_data  := io.dcr_write_data
-  io.base_dcrs.startup_addr := inner.io.base_dcrs_startup_addr
-  io.base_dcrs.startup_arg  := inner.io.base_dcrs_startup_arg
-  io.base_dcrs.mpm_class    := inner.io.base_dcrs_mpm_class
-}
-
 /** Thin wrapper forwarding flat IO to VxSchedule bundles.
  *  decode_sched_* are Inputs (decode → scheduler), not Outputs. */
 class VxScheduleBB(instanceId: String, coreId: Int) extends Module {
   import VortexGPUPkg._
   import VortexConfigConstants._
   val io = IO(new Bundle {
-    val base_dcrs = Input(new BaseDcrsBundle)
+    val startup_addr = Input(UInt(XLEN.W))
     val warp_ctl_valid            = Input(Bool())
     val warp_ctl_wid              = Input(UInt(NW_WIDTH.W))
     val warp_ctl_tmc_valid        = Input(Bool())
@@ -641,7 +609,7 @@ class VxScheduleBB(instanceId: String, coreId: Int) extends Module {
 
   val inner = Module(new VxSchedule(coreId))
 
-  inner.io.base_dcrs := io.base_dcrs
+  inner.io.startup_addr := io.startup_addr
 
   // warp_ctl (flat → WarpCtlBundle)
   inner.io.warp_ctl.valid                := io.warp_ctl_valid

@@ -172,7 +172,7 @@ lazy val chipyard = {
   val baseProjects: Seq[ProjectReference] =
     Seq(
       testchipip, rocketchip, boom, rocketchip_blocks, rocketchip_inclusive_cache,
-      icenet, tracegen,
+      icenet, tracegen, vortex,
       constellation, barf, shuttle, rerocc,
     ).map(sbt.Project.projectToRef) ++
     (if (useChisel7) Seq() else Seq(sbt.Project.projectToRef(firrtl2_bridge))) ++
@@ -257,6 +257,11 @@ lazy val chipyard = {
 
   cy
 }
+
+lazy val vortex = (project in file("generators/vortex"))
+  .dependsOn(rocketchip)
+  .settings(libraryDependencies ++= rocketLibDeps.value)
+  .settings(commonSettings)
 
 lazy val compressacc = withInitCheck((project in file("generators/compress-acc")), "compress-acc")
   .dependsOn(rocketchip)

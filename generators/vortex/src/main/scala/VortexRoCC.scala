@@ -4,13 +4,14 @@
 // Rocket Chip RoCC accelerator wrapper for the Vortex GPGPU Chisel translation.
 //
 // RoCC command (CUSTOM0 = 0x0B):
-//   rs1 = startup address  → written to DCR 0x001 (VX_DCR_BASE_STARTUP_ADDR0)
+//   rs1 = startup address  → wired directly to GPU (bypasses DCR)
 //   rs2 = startup argument → written to DCR 0x003 (VX_DCR_BASE_STARTUP_ARG0)
 //
-// After writing the two startup DCRs, the GPU is released from reset and
-// begins execution.  The RoCC busy signal is held high until the GPU reports
-// it has finished (gpu.io.busy goes low).  The GPU is re-asserted into reset
-// so it is ready for the next invocation.
+// startup_addr is registered and held on gpu.io.startup_addr throughout
+// execution; no DCR write is needed for it.  After writing the arg DCR, the
+// GPU is released from reset and begins execution.  The RoCC busy signal is
+// held high until the GPU reports it has finished (gpu.io.busy goes low).
+// The GPU is re-asserted into reset so it is ready for the next invocation.
 
 package vortex
 
@@ -65,49 +66,36 @@ class VortexRoCCModule(outer: VortexRoCC)(implicit p: Parameters)
   private val numSrcIds    = 1 << tagValueBits
 
   // -------------------------------------------------------------------------
-  // GPU instance — held in reset until startup DCRs have been written
+  // GPU instance — held in reset until startup_addr is latched and gpuReset deasserted
   // -------------------------------------------------------------------------
   val gpuReset = RegInit(true.B)
   val gpu = withReset(gpuReset || reset.asBool) { Module(new VortexTop) }
 
-  // DCR bus defaults (driven by state machine below)
-  gpu.io.dcr_write_valid := false.B
-  gpu.io.dcr_write_addr  := 0.U
-  gpu.io.dcr_write_data  := 0.U
+  val sIdle :: sStart :: sReset :: sBusy :: Nil = Enum(4)
+  val state        = RegInit(sIdle)
+  val startup_addr = Reg(UInt(32.W))   // startup address (rs1) — wired directly
+  val mpm_class    = RegInit(0.U(8.W)) // MPM class, not implemented yet
 
-  // -------------------------------------------------------------------------
-  // State machine: capture RoCC args → write DCRs → release reset → wait
-  // -------------------------------------------------------------------------
-  val sIdle :: sWriteAddr :: sWriteArg :: sStart :: sBusy :: Nil = Enum(5)
-  val state   = RegInit(sIdle)
-  val addrReg = Reg(UInt(32.W))   // startup address  (rs1[31:0])
-  val argReg  = Reg(UInt(32.W))   // startup argument (rs2[31:0])
+  // Both held stable for the entire execution
+  gpu.io.startup_addr := startup_addr
+  gpu.io.mpm_class    := mpm_class
 
   io.cmd.ready := state === sIdle
 
   switch (state) {
     is (sIdle) {
       when (io.cmd.valid) {
-        addrReg := io.cmd.bits.rs1(31, 0)
-        argReg  := io.cmd.bits.rs2(31, 0)
-        state   := sWriteAddr
+        startup_addr := io.cmd.bits.rs1
+        state        := sReset
       }
     }
-    is (sWriteAddr) {
-      gpu.io.dcr_write_valid := true.B
-      gpu.io.dcr_write_addr  := VX_DCR_BASE_STARTUP_ADDR0.U
-      gpu.io.dcr_write_data  := addrReg
-      state := sWriteArg
+    is (sReset) {
+        gpuReset := false.B
+        state   := sStart
     }
-    is (sWriteArg) {
-      gpu.io.dcr_write_valid := true.B
-      gpu.io.dcr_write_addr  := VX_DCR_BASE_STARTUP_ARG0.U
-      gpu.io.dcr_write_data  := argReg
-      state := sStart
-    }
+    // Needs 1 cycle to issue till it asserts busy
     is (sStart) {
-      gpuReset := false.B
-      state    := sBusy
+        state := sBusy
     }
     is (sBusy) {
       when (!gpu.io.busy) {
@@ -118,13 +106,14 @@ class VortexRoCCModule(outer: VortexRoCC)(implicit p: Parameters)
   }
 
   io.busy      := state =/= sIdle
-  io.interrupt := false.B
+  io.interrupt := false.B // TODO: To fully implement, need the GPU to interrupt
 
-  // No RoCC response needed
+  // No output
   io.resp.valid := false.B
   io.resp.bits  := DontCare
 
   // Tie off HellaCacheIO (memory is accessed via TL nodes instead)
+  // TODO: Maybe a program-defined mechanism to exclusively access control (not data) bytes
   io.mem.req.valid          := false.B
   io.mem.req.bits           := DontCare
   io.mem.s1_kill            := false.B

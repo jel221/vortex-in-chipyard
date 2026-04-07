@@ -24,10 +24,9 @@ class VxCoreTop(val coreId: Int = 0) extends Module {
   import VortexConfigConstants._
 
   val io = IO(new Bundle {
-    // DCR bus (slave)
-    val dcr_write_valid = Input(Bool())
-    val dcr_write_addr  = Input(UInt(VX_DCR_ADDR_WIDTH.W))
-    val dcr_write_data  = Input(UInt(32.W))
+    // Direct from RoCC (same pattern as startup_addr)
+    val startup_addr = Input(UInt(XLEN.W))
+    val mpm_class    = Input(UInt(8.W))
 
     // D-cache bus (DCACHE_NUM_REQS master ports)
     val dcache_req_valid  = Output(Vec(DCACHE_NUM_REQS, Bool()))
@@ -67,10 +66,8 @@ class VxCoreTop(val coreId: Int = 0) extends Module {
   // -------------------------------------------------------------------------
   val core = Module(new VxCore(coreId))
 
-  // DCR
-  core.io.dcr_write_valid := io.dcr_write_valid
-  core.io.dcr_write_addr  := io.dcr_write_addr
-  core.io.dcr_write_data  := io.dcr_write_data
+  core.io.startup_addr := io.startup_addr
+  core.io.mpm_class    := io.mpm_class
 
   // D-cache request / response
   for (i <- 0 until DCACHE_NUM_REQS) {

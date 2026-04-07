@@ -36,7 +36,7 @@ class VxSchedule(val coreId: Int = 0) extends Module {
 
   val io = IO(new Bundle {
     // configuration
-    val base_dcrs    = Input(new BaseDcrsBundle)
+    val startup_addr = Input(UInt(XLEN.W))
 
     // inputs
     val warp_ctl     = Input(new WarpCtlBundle(
@@ -87,17 +87,9 @@ class VxSchedule(val coreId: Int = 0) extends Module {
     if (i == 0) 1.U(NUM_THREADS.W) else 0.U(NUM_THREADS.W)
   )))
 
-  // Per-warp PCs (warp 0 gets startup_addr; initialised after first reset cycle)
-  val warp_pcs     = RegInit(VecInit(Seq.fill(NUM_WARPS)(0.U(PC_BITS.W))))
-
-  // One-shot: load startup_addr into warp_pcs(0) on the first post-reset cycle.
-  // The SV does this in the synchronous reset block using base_dcrs.startup_addr.
-  // For RV32 from_fullPC is the identity (PC_BITS == XLEN).
-  val startupLoaded = RegInit(false.B)
-  when (!startupLoaded) {
-    warp_pcs(0)   := io.base_dcrs.startup_addr
-    startupLoaded := true.B
-  }
+  // Only warp_pc(0) is initialized to io.startup_addr
+  val initValues = Seq(io.startup_addr) ++ Seq.fill(NUM_WARPS - 1)(0.U(PC_BITS.W))
+  val warp_pcs = RegInit(VecInit(initValues))
 
   // -------------------------------------------------------------------------
   // Cycles counter (counts while busy)

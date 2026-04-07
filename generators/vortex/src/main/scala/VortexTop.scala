@@ -61,10 +61,9 @@ class VxSocket(val socketId: Int = 0) extends Module {
   private val flagsWidth  = 3
 
   val io = IO(new Bundle {
-    // DCR write bus (slave)
-    val dcr_write_valid = Input(Bool())
-    val dcr_write_addr  = Input(UInt(VX_DCR_ADDR_BITS.W))
-    val dcr_write_data  = Input(UInt(32.W))
+    // Direct from RoCC (same pattern as startup_addr)
+    val startup_addr = Input(UInt(XLEN.W))
+    val mpm_class    = Input(UInt(8.W))
 
     // L1 memory bus (master)
     val mem_bus = Vec(L1_MEM_PORTS,
@@ -118,11 +117,10 @@ class VxSocket(val socketId: Int = 0) extends Module {
     ncEnable   = true
   ))
 
-  // Broadcast DCR to all cores
+  // Broadcast startup_addr and mpm_class to all cores
   for (i <- 0 until SOCKET_SIZE) {
-    cores(i).io.dcr_write_valid := io.dcr_write_valid
-    cores(i).io.dcr_write_addr  := io.dcr_write_addr
-    cores(i).io.dcr_write_data  := io.dcr_write_data
+    cores(i).io.startup_addr := io.startup_addr
+    cores(i).io.mpm_class    := io.mpm_class
   }
 
   // Connect cores → icache core_bus
@@ -194,9 +192,9 @@ class VxCluster(val clusterId: Int = 0) extends Module {
   private val flagsWidth  = 3
 
   val io = IO(new Bundle {
-    val dcr_write_valid = Input(Bool())
-    val dcr_write_addr  = Input(UInt(VX_DCR_ADDR_BITS.W))
-    val dcr_write_data  = Input(UInt(32.W))
+    // Direct from RoCC (same pattern as startup_addr)
+    val startup_addr = Input(UInt(XLEN.W))
+    val mpm_class    = Input(UInt(8.W))
 
     val mem_bus = Vec(L2_MEM_PORTS,
       new MemBusBundle(l2LineSize, l2AddrWidth, flagsWidth, L2_MEM_TAG_WIDTH, UUID_WIDTH))
@@ -229,9 +227,8 @@ class VxCluster(val clusterId: Int = 0) extends Module {
   ))
 
   for (s <- sockets) {
-    s.io.dcr_write_valid := io.dcr_write_valid
-    s.io.dcr_write_addr  := io.dcr_write_addr
-    s.io.dcr_write_data  := io.dcr_write_data
+    s.io.startup_addr := io.startup_addr
+    s.io.mpm_class    := io.mpm_class
   }
 
   for (i <- 0 until NUM_SOCKETS) {
@@ -276,9 +273,9 @@ class VortexTop extends Module {
     val mem_bus = Vec(L3_MEM_PORTS,
       new MemBusBundle(memLineSize, memAddrWidth, flagsWidth, L3_MEM_TAG_WIDTH, UUID_WIDTH))
 
-    val dcr_write_valid = Input(Bool())
-    val dcr_write_addr  = Input(UInt(VX_DCR_ADDR_BITS.W))
-    val dcr_write_data  = Input(UInt(32.W))
+    // Direct from RoCC (same pattern as startup_addr)
+    val startup_addr = Input(UInt(XLEN.W))
+    val mpm_class    = Input(UInt(8.W))
 
     val busy = Output(Bool())
   })
@@ -306,9 +303,8 @@ class VortexTop extends Module {
   ))
 
   for (c <- clusters) {
-    c.io.dcr_write_valid := io.dcr_write_valid
-    c.io.dcr_write_addr  := io.dcr_write_addr
-    c.io.dcr_write_data  := io.dcr_write_data
+    c.io.startup_addr := io.startup_addr
+    c.io.mpm_class    := io.mpm_class
   }
 
   for (i <- 0 until NUM_CLUSTERS) {

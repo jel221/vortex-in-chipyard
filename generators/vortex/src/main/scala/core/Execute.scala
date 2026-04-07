@@ -41,9 +41,6 @@ class VxExecute(val instanceId: String = "", val coreId: Int = 0) extends Module
   // I/O
   // -----------------------------------------------------------------------
   val io = IO(new Bundle {
-    // DCR startup registers
-    val base_dcrs = Input(new BaseDcrsBundle)
-
     // LSU → D-cache bus  (NUM_LSU_BLOCKS interfaces, flattened)
     val lsu_mem_req_valid  = Output(Vec(numLsuBlocks, Bool()))
     val lsu_mem_req_ready  = Input(Vec(numLsuBlocks, Bool()))
@@ -91,6 +88,9 @@ class VxExecute(val instanceId: String = "", val coreId: Int = 0) extends Module
     val commit_data   = Output(Vec(numDispatch, Vec(SIMD_WIDTH, UInt(XLEN.W))))
     val commit_sop    = Output(Vec(numDispatch, Bool()))
     val commit_eop    = Output(Vec(numDispatch, Bool()))
+
+    // MPM class — direct from RoCC (same pattern as startup_addr)
+    val mpm_class = Input(UInt(8.W))
 
     // Scheduler CSR interface (slave)
     val sched_csr_cycles        = Input(UInt(PERF_CTR_BITS.W))
@@ -248,9 +248,10 @@ class VxExecute(val instanceId: String = "", val coreId: Int = 0) extends Module
   val sfuUnit = Module(new SfuUnit(coreId))
   val csrUnit = Module(new CsrUnit(coreId, NUM_SFU_LANES, instanceId + "-csr"))
 
-  // tie off perf/sysmem inputs
+  // tie off perf/sysmem inputs (no perf counters collected yet)
   csrUnit.io.sysmem_perf   := 0.U.asTypeOf(new SysmemPerfBundle)
   csrUnit.io.pipeline_perf := 0.U.asTypeOf(new PipelinePerfBundle)
+  csrUnit.io.mpm_class     := io.mpm_class
 
   // FPU unit — instantiated after csrUnit so CSR cross-connections can be made
   if (EXT_F_ENABLED == 1) {
@@ -312,9 +313,6 @@ class VxExecute(val instanceId: String = "", val coreId: Int = 0) extends Module
   io.sched_csr_alm_empty_wid := csrUnit.io.alm_empty_wid
   io.sched_csr_unlock_wid    := csrUnit.io.unlock_wid
   io.sched_csr_unlock_warp   := csrUnit.io.unlock_warp
-
-  // base_dcrs → CsrUnit
-  csrUnit.io.base_dcrs := io.base_dcrs
 
   // Dispatch to SfuUnit
   for (i <- 0 until ISSUE_WIDTH) {

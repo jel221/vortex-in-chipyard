@@ -55,15 +55,15 @@ class CsrData(
   // I/O
   // -------------------------------------------------------------------------
   val io = IO(new Bundle {
-    // Base device configuration registers
-    val base_dcrs = Input(new BaseDcrsBundle)
-
-    // Performance counter inputs (present always, used when perfEnable)
+    // Performance counter inputs
     val sysmem_perf   = Input(new SysmemPerfBundle)
     val pipeline_perf = Input(new PipelinePerfBundle)
 
     // Commit CSR interface (instret counter)
     val commit_instret = Input(UInt(PERF_CTR_BITS.W))
+
+    // MPM class — direct from RoCC (like startup_addr)
+    val mpm_class = Input(UInt(8.W))
 
     // FPU CSR interface (EXT_F_ENABLE assumed)
     val fpu_write_enable = Input(Vec(NUM_FPU_BLOCKS, Bool()))
@@ -146,17 +146,9 @@ class CsrData(
   }
 
   // -------------------------------------------------------------------------
-  // mscratch register (initialised from base_dcrs.startup_arg at reset)
+  // mscratch register
   // -------------------------------------------------------------------------
   val mscratch = RegInit(0.U(XLEN.W))
-
-  // On the first cycle after reset, load startup_arg.
-  // The SV code initialises to base_dcrs.startup_arg in a reset-triggered
-  // always block.  We mirror that with a reset register seeded from the input.
-  val resetPipe = RegNext(true.B, false.B)  // goes high one cycle after reset
-  when (!resetPipe) {
-    mscratch := io.base_dcrs.startup_arg
-  }
 
   when (io.write_enable) {
     switch (io.write_addr) {
@@ -254,7 +246,7 @@ class CsrData(
     val mpmRo = Wire(UInt(XLEN.W))
     mpmRo := 0.U
 
-    when (io.base_dcrs.mpm_class === VX_DCR_MPM_CLASS_CORE.U) {
+    when (io.mpm_class === VX_DCR_MPM_CLASS_CORE.U) {
       switch (io.read_addr) {
         is (VX_CSR_MPM_SCHED_ID.U)  { mpmRo := perf64(VX_CSR_MPM_SCHED_ID, io.pipeline_perf.sched.idles) }
         is ((VX_CSR_MPM_SCHED_ID+0x80).U) { mpmRo := perf64(VX_CSR_MPM_SCHED_ID, io.pipeline_perf.sched.idles) }
@@ -289,7 +281,7 @@ class CsrData(
         is (VX_CSR_MPM_LOAD_LT.U)   { mpmRo := perf64(VX_CSR_MPM_LOAD_LT,  io.pipeline_perf.load_latency) }
         is ((VX_CSR_MPM_LOAD_LT+0x80).U)  { mpmRo := perf64(VX_CSR_MPM_LOAD_LT,  io.pipeline_perf.load_latency) }
       }
-    }.elsewhen (io.base_dcrs.mpm_class === VX_DCR_MPM_CLASS_MEM.U) {
+    }.elsewhen (io.mpm_class === VX_DCR_MPM_CLASS_MEM.U) {
       switch (io.read_addr) {
         is (VX_CSR_MPM_ICACHE_READS.U)    { mpmRo := perf64(VX_CSR_MPM_ICACHE_READS,   io.sysmem_perf.icache.reads) }
         is ((VX_CSR_MPM_ICACHE_READS+0x80).U){ mpmRo := perf64(VX_CSR_MPM_ICACHE_READS,   io.sysmem_perf.icache.reads) }

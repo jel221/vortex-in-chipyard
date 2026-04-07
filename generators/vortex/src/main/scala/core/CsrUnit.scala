@@ -56,12 +56,12 @@ class CsrUnit(
   // I/O
   // -------------------------------------------------------------------------
   val io = IO(new Bundle {
-    // Base DCRs
-    val base_dcrs = Input(new BaseDcrsBundle)
-
     // Perf inputs (present always, used when perfEnable=true)
     val sysmem_perf   = Input(new SysmemPerfBundle)
     val pipeline_perf = Input(new PipelinePerfBundle)
+
+    // MPM class — direct from RoCC (same pattern as startup_addr)
+    val mpm_class = Input(UInt(8.W))
 
     // FPU CSR interface (EXT_F_ENABLE assumed)
     val fpu_write_enable = Input(Vec(NUM_FPU_BLOCKS, Bool()))
@@ -140,10 +140,10 @@ class CsrUnit(
     perfEnable= perfEnable
   ))
 
-  csrData.io.base_dcrs      := io.base_dcrs
   csrData.io.sysmem_perf    := io.sysmem_perf
   csrData.io.pipeline_perf  := io.pipeline_perf
   csrData.io.commit_instret := io.commit_instret
+  csrData.io.mpm_class      := io.mpm_class
   csrData.io.cycles         := io.cycles
   csrData.io.active_warps   := io.active_warps
   csrData.io.thread_masks   := io.thread_masks
