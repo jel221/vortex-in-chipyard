@@ -68,7 +68,8 @@ class CacheBypass(
 
   // NC tag widths (match SV computation)
   private val coreTagIdWidth = coreTagWidth - uuidWidth
-  private val memTagIdWidth  = log2Ceil(math.max(1, (numReqs + memPorts - 1) / memPorts)) + coreTagIdWidth
+  private val arbSelBits     = log2Ceil(math.max(1, (numReqs + memPorts - 1) / memPorts))
+  private val memTagIdWidth  = arbSelBits + coreTagIdWidth
   private val memTagNc1Width = uuidWidth + memTagIdWidth
   private val memTagNc2Width = memTagNc1Width + wselBits
   private val memTagOutWidth = if (cacheEnable) math.max(memTagInWidth, memTagNc2Width)
@@ -189,8 +190,15 @@ class CacheBypass(
     // Insert wsel into tag at tagSelIdx position, then prepend UUID
     // Simplified: pack UUID ++ tag_value ++ wsel
     val raw_tag = req_bits.tag.asUInt
-    val tag_w   = if (wordsPerLine > 1) Cat(raw_tag(coreTagWidth-1, tagSelIdx), wsel, raw_tag(tagSelIdx-1, 0))
-                  else raw_tag(memTagNc2Width - 1, 0)
+    // wordsPerLine > 1: insert wsel at tagSelIdx (adds wselBits to the tag)
+    // wordsPerLine == 1 with arb bits needed: append arb_grant at bottom (adds arbSelBits)
+    // wordsPerLine == 1, no arb bits: tag width is already memTagNc2Width
+    val tag_w   = if (wordsPerLine > 1)
+                    Cat(raw_tag(coreTagWidth-1, tagSelIdx), wsel, raw_tag(tagSelIdx-1, 0))
+                  else if (arbSelBits > 0)
+                    Cat(raw_tag, arb_grant(p)(arbSelBits - 1, 0))
+                  else
+                    raw_tag
 
     io.mem_bus_out(p).req.valid        := mem_req_valid_w
     io.mem_bus_out(p).req.bits.rw      := req_bits.rw

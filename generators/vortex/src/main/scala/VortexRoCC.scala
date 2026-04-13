@@ -37,7 +37,7 @@ class VortexRoCC(opcodes: OpcodeSet)(implicit p: Parameters)
   private val numSrcIds    = 1 << tagValueBits
 
   // One TileLink client node per L3 memory port
-  val memNodes = Seq.tabulate(VortexConfigConstants.L3_MEM_PORTS) { i =>
+  val memNodes = Seq.tabulate(VortexGPUPkg.L3_MEM_PORTS) { i =>
     TLClientNode(Seq(TLMasterPortParameters.v1(
       clients = Seq(TLMasterParameters.v1(
         name     = s"vortex-mem-$i",
@@ -46,8 +46,13 @@ class VortexRoCC(opcodes: OpcodeSet)(implicit p: Parameters)
     )))
   }
 
-  // Connect every memory node to the system bus via atlNode
-  memNodes.foreach { node => atlNode := TLBuffer() := node }
+  // Connect every memory node to the system bus via atlNode.
+  // TLWidthWidget widens the inner (VortexRoCCModule-facing) TL data bus to
+  // L3_LINE_SIZE bytes so that tl.d.bits.data is the full 512-bit cache line.
+  // It also handles splitting wide A-channel Puts into narrow beats going out.
+  memNodes.foreach { node =>
+    atlNode := TLBuffer() := TLWidthWidget(VortexConfigConstants.L3_LINE_SIZE) := node
+  }
 
   override lazy val module = new VortexRoCCModule(this)
 }
@@ -81,7 +86,8 @@ class VortexRoCCModule(outer: VortexRoCC)(implicit p: Parameters)
   gpu.io.mpm_class    := mpm_class
 
   io.cmd.ready := state === sIdle
-
+  
+  // This is somewhat similar to the code in rtlsim vortex.cpp
   switch (state) {
     is (sIdle) {
       when (io.cmd.valid) {
@@ -127,39 +133,53 @@ class VortexRoCCModule(outer: VortexRoCC)(implicit p: Parameters)
     val memBus     = gpu.io.mem_bus(mp)
     val (tl, edge) = outer.memNodes(mp).out(0)
 
-    // Per-port UUID save table: entry = tag.value index (tagValueBits wide)
-    val uuidTable = Reg(Vec(numSrcIds, UInt(UUID_WIDTH.W)))
+    // Free-list: one bit per source ID, true = free
+    val srcFree  = RegInit(VecInit(Seq.fill(numSrcIds)(true.B)))
+    val allocOH  = PriorityEncoderOH(srcFree.asUInt)
+    val allocId  = OHToUInt(allocOH)
+    val canAlloc = srcFree.asUInt.orR
+
+    // Per-source-ID tables to recover original Vortex tag on response
+    val tagValTable = Reg(Vec(numSrcIds, UInt(tagValueBits.W)))
+    val uuidTable   = Reg(Vec(numSrcIds, UInt(UUID_WIDTH.W)))
 
     // Convert Vortex word address to TL byte address
     val reqByteAddr = Cat(memBus.req.bits.addr, 0.U(logLineSize.W))
 
     val (_, getA) = edge.Get(
-      fromSource = memBus.req.bits.tag.value,
+      fromSource = allocId,
       toAddress  = reqByteAddr,
       lgSize     = logLineSize.U
     )
     val (_, putA) = edge.Put(
-      fromSource = memBus.req.bits.tag.value,
+      fromSource = allocId,
       toAddress  = reqByteAddr,
       lgSize     = logLineSize.U,
       data       = memBus.req.bits.data,
       mask       = memBus.req.bits.byteen
     )
 
-    tl.a.valid       := memBus.req.valid
+    tl.a.valid       := memBus.req.valid && canAlloc && !gpuReset
     tl.a.bits        := Mux(memBus.req.bits.rw, putA, getA)
-    memBus.req.ready := tl.a.ready
+    memBus.req.ready := tl.a.ready && canAlloc
 
-    // Save UUID when the request fires; return it with the response
-    when (memBus.req.valid && tl.a.ready) {
-      uuidTable(memBus.req.bits.tag.value) := memBus.req.bits.tag.uuid
+    // Allocate source ID and save original tag when request fires
+    when (memBus.req.valid && tl.a.ready && canAlloc) {
+      srcFree(allocId)     := false.B
+      tagValTable(allocId) := memBus.req.bits.tag.value
+      uuidTable(allocId)   := memBus.req.bits.tag.uuid
     }
 
-    tl.d.ready                := memBus.rsp.ready
+    tl.d.ready                := memBus.rsp.ready && !gpuReset
     memBus.rsp.valid          := tl.d.valid
     memBus.rsp.bits.data      := tl.d.bits.data
-    memBus.rsp.bits.tag.value := tl.d.bits.source
+    memBus.rsp.bits.tag.value := tagValTable(tl.d.bits.source)
     memBus.rsp.bits.tag.uuid  := uuidTable(tl.d.bits.source)
+
+    // Free source ID on response
+    when (tl.d.valid && tl.d.ready) {
+      srcFree(tl.d.bits.source) := true.B
+    }
 
     // Tie off probe / release / grant-ack channels
     tl.b.ready := true.B

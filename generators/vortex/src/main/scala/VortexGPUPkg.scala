@@ -507,6 +507,18 @@ object VortexGPUPkg {
   val DCACHE_LINE_SIZE:  Int = L1_LINE_SIZE                               // DCache line size (bytes)
   val DCACHE_CHANNELS:   Int = up((NUM_LSU_LANES * LSU_WORD_SIZE) / DCACHE_WORD_SIZE)
   val DCACHE_NUM_REQS:   Int = NUM_LSU_BLOCKS * DCACHE_CHANNELS
+  val DCACHE_NUM_BANKS:  Int = math.min(DCACHE_NUM_REQS, 16)
+
+  // L1/L2/L3 memory port counts — mirrors VX_gpu_pkg.sv port-count formulas.
+  // Moved here from VortexConfigConstants so DCACHE_NUM_REQS is available.
+  val L1_MEM_PORTS: Int = math.min(DCACHE_NUM_BANKS, PLATFORM_MEMORY_NUM_BANKS)
+  private val _L2_NUM_REQS:  Int = NUM_SOCKETS * L1_MEM_PORTS
+  private val _L2_NUM_BANKS: Int = math.min(_L2_NUM_REQS, 16)
+  val L2_MEM_PORTS: Int = math.min(_L2_NUM_BANKS, PLATFORM_MEMORY_NUM_BANKS)
+  private val _L3_NUM_REQS:  Int = NUM_CLUSTERS * L2_MEM_PORTS
+  private val _L3_NUM_BANKS: Int = math.min(_L3_NUM_REQS, 16)
+  val L3_MEM_PORTS: Int = math.min(_L3_NUM_BANKS, PLATFORM_MEMORY_NUM_BANKS)
+
   val DCACHE_MERGED_REQS: Int = (NUM_LSU_LANES * LSU_WORD_SIZE) / DCACHE_WORD_SIZE
   // CDIV helper: ceiling division
   val DCACHE_MEM_BATCHES: Int = (DCACHE_MERGED_REQS + DCACHE_CHANNELS - 1) / DCACHE_CHANNELS
@@ -516,7 +528,6 @@ object VortexGPUPkg {
 
   // -------------------------------------------------------------------------
   // Top-level VX memory interface parameters  (from VX_gpu_pkg.sv)
-  // L3_MEM_PORTS = 2 (PLATFORM_MEMORY_NUM_BANKS when L3 disabled)
   // -------------------------------------------------------------------------
 
   val VX_MEM_PORTS:        Int = L3_MEM_PORTS                           // Number of memory ports

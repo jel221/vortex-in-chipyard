@@ -139,14 +139,24 @@ class CacheWrap(
       bypass.io.mem_bus_in(i).rsp.ready := mem_bus_cache_rsp_r(i)
     }
     // Bypass mem out → io.mem_bus
+    // Use field-by-field assignment (mirrors ASSIGN_VX_MEM_BUS_IF_EX in VX_define.vh).
+    // The bypass output tag is memTagOutWidth bits while io.mem_bus tag is memTagWidth
+    // bits (one wider for the NC discriminator).  A bulk asTypeOf would reinterpret the
+    // raw bits and shift every field by one position, corrupting addr and all others.
     for (i <- 0 until memPorts) {
-      io.mem_bus(i).req.valid := bypass.io.mem_bus_out(i).req.valid
-      io.mem_bus(i).req.bits  := bypass.io.mem_bus_out(i).req.bits
-                                  .asTypeOf(io.mem_bus(i).req.bits)
+      io.mem_bus(i).req.valid          := bypass.io.mem_bus_out(i).req.valid
+      io.mem_bus(i).req.bits.rw        := bypass.io.mem_bus_out(i).req.bits.rw
+      io.mem_bus(i).req.bits.addr      := bypass.io.mem_bus_out(i).req.bits.addr
+      io.mem_bus(i).req.bits.data      := bypass.io.mem_bus_out(i).req.bits.data
+      io.mem_bus(i).req.bits.byteen    := bypass.io.mem_bus_out(i).req.bits.byteen
+      io.mem_bus(i).req.bits.flags     := bypass.io.mem_bus_out(i).req.bits.flags
+      io.mem_bus(i).req.bits.tag       := bypass.io.mem_bus_out(i).req.bits.tag.asUInt
+                                          .asTypeOf(io.mem_bus(i).req.bits.tag)
       bypass.io.mem_bus_out(i).req.ready := io.mem_bus(i).req.ready
       bypass.io.mem_bus_out(i).rsp.valid := io.mem_bus(i).rsp.valid
-      bypass.io.mem_bus_out(i).rsp.bits  := io.mem_bus(i).rsp.bits
-                                             .asTypeOf(bypass.io.mem_bus_out(i).rsp.bits)
+      bypass.io.mem_bus_out(i).rsp.bits.data := io.mem_bus(i).rsp.bits.data
+      bypass.io.mem_bus_out(i).rsp.bits.tag  := io.mem_bus(i).rsp.bits.tag.asUInt
+                                                .asTypeOf(bypass.io.mem_bus_out(i).rsp.bits.tag)
       io.mem_bus(i).rsp.ready := bypass.io.mem_bus_out(i).rsp.ready
     }
   } else {

@@ -48,8 +48,6 @@ class VxIssueSlice(
     val decode_rs1     = Input(UInt(NUM_REGS_BITS.W))
     val decode_rs2     = Input(UInt(NUM_REGS_BITS.W))
     val decode_rs3     = Input(UInt(NUM_REGS_BITS.W))
-    // ibuf_pop sideband (non-L1 path)
-    val decode_ibuf_pop = Output(UInt(PER_ISSUE_WARPS.W))
 
     // Writeback (slave)
     val wb_valid  = Input(Bool())
@@ -105,7 +103,6 @@ class VxIssueSlice(
   ibuffer.io.decode_rs1     := io.decode_rs1
   ibuffer.io.decode_rs2     := io.decode_rs2
   ibuffer.io.decode_rs3     := io.decode_rs3
-  io.decode_ibuf_pop        := ibuffer.io.decode_ibuf_pop
 
   // Build per-warp IbufferBundle from VxIbuffer's individual field outputs
   val ibuf_valid  = Wire(Vec(PER_ISSUE_WARPS, Bool()))

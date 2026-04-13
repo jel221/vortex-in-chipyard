@@ -104,7 +104,6 @@ class VxCore(val coreId: Int = 0, val instanceId: String = "") extends Module {
   val decode_rs1     = Wire(UInt(NUM_REGS_BITS.W))
   val decode_rs2     = Wire(UInt(NUM_REGS_BITS.W))
   val decode_rs3     = Wire(UInt(NUM_REGS_BITS.W))
-  val decode_ibuf_pop = Wire(UInt(NUM_WARPS.W))
 
   // decode → scheduler sideband
   val decode_sched_valid  = Wire(Bool())
@@ -337,7 +336,6 @@ class VxCore(val coreId: Int = 0, val instanceId: String = "") extends Module {
   schedule.io.decode_sched_valid  := decode_sched_valid
   schedule.io.decode_sched_unlock := decode_sched_unlock
   schedule.io.decode_sched_wid    := decode_sched_wid
-  decode.io.ibuf_pop    := decode_ibuf_pop
 
   // -------------------------------------------------------------------------
   // VX_issue
@@ -358,7 +356,7 @@ class VxCore(val coreId: Int = 0, val instanceId: String = "") extends Module {
   issueStage.io.decode_rs1     := decode_rs1
   issueStage.io.decode_rs2     := decode_rs2
   issueStage.io.decode_rs3     := decode_rs3
-  decode_ibuf_pop              := issueStage.io.decode_ibuf_pop
+
   for (i <- 0 until ISSUE_WIDTH) {
     issueStage.io.wb_valid(i)  := wb_valid(i)
     issueStage.io.wb_uuid(i)   := wb_uuid(i)
@@ -705,7 +703,6 @@ class VxDecodeBB(instanceId: String) extends Module {
     val decode_sched_valid  = Output(Bool())
     val decode_sched_unlock = Output(Bool())
     val decode_sched_wid    = Output(UInt(NW_WIDTH.W))
-    val ibuf_pop       = Input(UInt(NUM_WARPS.W))
   })
   val inner = Module(new VxDecode)
   inner.io.fetch_valid      := io.fetch_valid
@@ -716,7 +713,6 @@ class VxDecodeBB(instanceId: String) extends Module {
   inner.io.fetch_PC         := io.fetch_PC
   inner.io.fetch_instr      := io.fetch_instr
   inner.io.decode_ready     := io.decode_ready
-  inner.io.decode_ibuf_pop  := io.ibuf_pop
   io.decode_valid           := inner.io.decode_valid
   io.decode_uuid            := inner.io.decode_uuid
   io.decode_wid             := inner.io.decode_wid

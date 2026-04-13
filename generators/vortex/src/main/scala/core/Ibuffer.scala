@@ -62,8 +62,6 @@ class VxIbuffer(
     val decode_rs1     = Input(UInt(NUM_REGS_BITS.W))
     val decode_rs2     = Input(UInt(NUM_REGS_BITS.W))
     val decode_rs3     = Input(UInt(NUM_REGS_BITS.W))
-    // ibuf_pop sideband (L1-disabled path); unused when L1 is enabled
-    val decode_ibuf_pop = Output(UInt(NUM_WARPS.W))
 
     // Ibuffer outputs: PER_ISSUE_WARPS parallel channels
     val ibuf_valid    = Output(Vec(PER_ISSUE_WARPS, Bool()))
@@ -114,9 +112,6 @@ class VxIbuffer(
 
   // decode_if.ready = ibuf_ready_in[decode_wis]
   io.decode_ready := ibuf_ready_in(decode_wis)
-
-  // ibuf_pop is unused (L1 enabled by default)
-  io.decode_ibuf_pop := 0.U
 
   for (w <- 0 until PER_ISSUE_WARPS) {
 

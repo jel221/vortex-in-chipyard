@@ -47,8 +47,6 @@ class VxDecode extends Module {
     val fetch_tmask = Input(UInt(NUM_THREADS.W))
     val fetch_PC    = Input(UInt(PC_BITS.W))
     val fetch_instr = Input(UInt(32.W))
-    // ibuf_pop sideband (L1-disabled path)
-    val ibuf_pop    = Output(UInt(NUM_WARPS.W))
 
     // Decode interface (master)
     val decode_valid   = Output(Bool())
@@ -66,8 +64,6 @@ class VxDecode extends Module {
     val decode_rs1     = Output(UInt(NUM_REGS_BITS.W))
     val decode_rs2     = Output(UInt(NUM_REGS_BITS.W))
     val decode_rs3     = Output(UInt(NUM_REGS_BITS.W))
-    // ibuf_pop from decode stage back to fetch (L1-disabled)
-    val decode_ibuf_pop = Input(UInt(NUM_WARPS.W))
 
     // Decode-to-scheduler feedback
     val decode_sched_valid  = Output(Bool())
@@ -695,9 +691,4 @@ class VxDecode extends Module {
   io.decode_sched_valid  := fetch_fire
   io.decode_sched_wid    := io.fetch_wid
   io.decode_sched_unlock := !is_wstall
-
-  // -------------------------------------------------------------------------
-  // ibuf_pop sideband (L1-disabled path): pass through from decode interface
-  // -------------------------------------------------------------------------
-  io.ibuf_pop := io.decode_ibuf_pop
 }

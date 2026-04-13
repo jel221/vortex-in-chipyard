@@ -17,7 +17,7 @@ import VortexConfigConstants._
  */
 class VxFetch extends Module {
   // Derived widths (matching VX_define / VX_gpu_pkg defaults)
-  private val icacheWordSize  = L1_LINE_SIZE   // bytes
+  private val icacheWordSize  = 4   // bytes
   private val icacheAddrW     = MEM_ADDR_WIDTH - log2Ceil(icacheWordSize)
   private val icacheTagW      = UUID_WIDTH + NW_WIDTH
 
@@ -52,9 +52,6 @@ class VxFetch extends Module {
     val fetch_PC    = Output(UInt(PC_BITS.W))
     val fetch_instr = Output(UInt(32.W))
     val fetch_uuid  = Output(UInt(UUID_WIDTH.W))
-
-    // ibuf_pop sideband (for non-L1 path)
-    val ibuf_pop = Input(UInt(NUM_WARPS.W))
   })
 
   // -------------------------------------------------------------------------
@@ -79,23 +76,9 @@ class VxFetch extends Module {
   val rspTmask = rspData(NUM_THREADS - 1, 0)
 
   // -------------------------------------------------------------------------
-  // Pending ibuffer tracking (no-L1 path)
-  // -------------------------------------------------------------------------
-  val pendingIbufFull = Wire(Vec(NUM_WARPS, Bool()))
-  for (i <- 0 until NUM_WARPS) {
-    val pendingCnt = RegInit(0.U(log2Ceil(IBUF_SIZE + 1).W))
-    val incr = icacheReqFire && (io.schedule_wid === i.U)
-    val decr = io.ibuf_pop(i)
-    when (incr && !decr) { pendingCnt := pendingCnt + 1.U }
-    .elsewhen (!incr && decr) { pendingCnt := pendingCnt - 1.U }
-    pendingIbufFull(i) := (pendingCnt === IBUF_SIZE.U)
-  }
-  val ibufReady = !pendingIbufFull(io.schedule_wid)
-
-  // -------------------------------------------------------------------------
   // I-cache request
   // -------------------------------------------------------------------------
-  val icacheReqValid = io.schedule_valid && ibufReady
+  val icacheReqValid = io.schedule_valid
 
   // PC to I-cache address: word-aligned, strip low bits
   // 4-byte aligned → shift by 2; then take icacheAddrW bits
@@ -104,7 +87,7 @@ class VxFetch extends Module {
 
   icacheReqFire := icacheReqValid && io.icache_req_ready
 
-  io.schedule_ready := io.icache_req_ready && ibufReady
+  io.schedule_ready := io.icache_req_ready
 
   // Output register (elastic buffer size=2, out_reg=1)
   val reqValidReg  = RegInit(false.B)

@@ -192,11 +192,6 @@ object VortexConfigConstants {
   val DCACHE_DIRTYBYTES:  Int = 0              // `DCACHE_DIRTYBYTES (= DCACHE_WRITEBACK)
   val DCACHE_REPL_POLICY: Int = 1              // `DCACHE_REPL_POLICY
 
-  // L1 memory ports: MIN(DCACHE_NUM_BANKS, PLATFORM_MEMORY_NUM_BANKS)
-  // DCACHE_NUM_BANKS = MIN(DCACHE_NUM_REQS, 16); DCACHE_NUM_REQS derived in VortexGPUPkg
-  // Use platform banks as a safe upper bound default
-  val L1_MEM_PORTS: Int      = min(PLATFORM_MEMORY_NUM_BANKS, PLATFORM_MEMORY_NUM_BANKS)  // `L1_MEM_PORTS (placeholder — actual value from DCACHE_NUM_BANKS at runtime)
-
   // ---------------------------------------------------------------------------
   // LMEM knobs
   // ---------------------------------------------------------------------------
@@ -208,7 +203,7 @@ object VortexConfigConstants {
   // L2 cache knobs  (disabled by default)
   // ---------------------------------------------------------------------------
 
-  val L2_ENABLED:      Int   = 0              // `L2_ENABLED (L2_ENABLE not defined)
+  val L2_ENABLED:      Int   = 1              // `L2_ENABLED (L2_ENABLE not defined)
   val L2_CACHE_SIZE:   Int   = 1048576        // `L2_CACHE_SIZE (bytes)
   val L2_CRSQ_SIZE:    Int   = 2              // `L2_CRSQ_SIZE
   val L2_MSHR_SIZE:    Int   = 16             // `L2_MSHR_SIZE
@@ -218,15 +213,11 @@ object VortexConfigConstants {
   val L2_WRITEBACK:    Int   = 0              // `L2_WRITEBACK
   val L2_DIRTYBYTES:   Int   = 0              // `L2_DIRTYBYTES
   val L2_REPL_POLICY:  Int   = 1              // `L2_REPL_POLICY
-  // L2_MEM_PORTS: when L2 disabled = MIN(L2_NUM_REQS, PLATFORM_MEMORY_NUM_BANKS)
-  // L2_NUM_REQS = NUM_SOCKETS * L1_MEM_PORTS (computed in VortexGPUPkg)
-  val L2_MEM_PORTS:    Int   = PLATFORM_MEMORY_NUM_BANKS  // `L2_MEM_PORTS (simplified for disabled case)
-
   // ---------------------------------------------------------------------------
   // L3 cache knobs  (disabled by default)
   // ---------------------------------------------------------------------------
 
-  val L3_ENABLED:      Int   = 0              // `L3_ENABLED (L3_ENABLE not defined)
+  val L3_ENABLED:      Int   = 1              // `L3_ENABLED (L3_ENABLE not defined)
   val L3_CACHE_SIZE:   Int   = 2097152        // `L3_CACHE_SIZE (bytes)
   val L3_CRSQ_SIZE:    Int   = 2              // `L3_CRSQ_SIZE
   val L3_MSHR_SIZE:    Int   = 16             // `L3_MSHR_SIZE
@@ -236,10 +227,6 @@ object VortexConfigConstants {
   val L3_WRITEBACK:    Int   = 0              // `L3_WRITEBACK
   val L3_DIRTYBYTES:   Int   = 0              // `L3_DIRTYBYTES
   val L3_REPL_POLICY:  Int   = 1              // `L3_REPL_POLICY
-  // L3_MEM_PORTS: when L3 disabled = MIN(L3_NUM_REQS, PLATFORM_MEMORY_NUM_BANKS)
-  // L3_NUM_REQS = NUM_CLUSTERS * L2_MEM_PORTS; for 1 cluster, 2 banks => 2
-  val L3_MEM_PORTS:    Int   = 2              // `L3_MEM_PORTS (= PLATFORM_MEMORY_NUM_BANKS)
-
   // ---------------------------------------------------------------------------
   // Extension enables (1/0 flags)  (VX_config.vh)
   // ---------------------------------------------------------------------------

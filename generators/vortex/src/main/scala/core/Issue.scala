@@ -48,8 +48,6 @@ class VxIssue(val instanceId: String = "") extends Module {
     val decode_rs1     = Input(UInt(NUM_REGS_BITS.W))
     val decode_rs2     = Input(UInt(NUM_REGS_BITS.W))
     val decode_rs3     = Input(UInt(NUM_REGS_BITS.W))
-    // ibuf_pop for non-L1 path (NUM_WARPS total = ISSUE_WIDTH * PER_ISSUE_WARPS)
-    val decode_ibuf_pop = Output(UInt(NUM_WARPS.W))
 
     // Writeback inputs (one per issue slot)
     val wb_valid  = Input(Vec(ISSUE_WIDTH, Bool()))
@@ -97,12 +95,6 @@ class VxIssue(val instanceId: String = "") extends Module {
   val decodeReadyIn = Wire(Vec(ISSUE_WIDTH, Bool()))
   io.decode_ready := decodeReadyIn(decodeIsw)
 
-  // -------------------------------------------------------------------------
-  // Instantiate ISSUE_WIDTH issue slices and wire them.
-  // -------------------------------------------------------------------------
-  val ibufPopAll = Wire(Vec(NUM_WARPS, Bool()))
-  for (w <- 0 until NUM_WARPS) ibufPopAll(w) := false.B
-
   for (issueId <- 0 until ISSUE_WIDTH) {
     val slice = Module(new VxIssueSlice(
       instanceId = s"${instanceId}${issueId}",
@@ -125,12 +117,6 @@ class VxIssue(val instanceId: String = "") extends Module {
     slice.io.decode_rs2     := io.decode_rs2
     slice.io.decode_rs3     := io.decode_rs3
     decodeReadyIn(issueId)  := slice.io.decode_ready
-
-    // ibuf_pop: each slice covers PER_ISSUE_WARPS warps starting at issueId*PER_ISSUE_WARPS
-    val popBase = issueId * PER_ISSUE_WARPS
-    for (w <- 0 until PER_ISSUE_WARPS) {
-      ibufPopAll(popBase + w) := slice.io.decode_ibuf_pop(w)
-    }
 
     // Writeback to this slice
     slice.io.wb_valid  := io.wb_valid(issueId)
@@ -169,6 +155,4 @@ class VxIssue(val instanceId: String = "") extends Module {
       io.dispatch_eop(dispIdx)      := slice.io.dispatch_eop(exId)
     }
   }
-
-  io.decode_ibuf_pop := ibufPopAll.asUInt
 }
