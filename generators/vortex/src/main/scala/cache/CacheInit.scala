@@ -17,46 +17,41 @@ package vortex
 
 import chisel3._
 import chisel3.util._
+import VortexGPUPkg._
 
 /**
  * CacheInit – cache flush/init sequencer that sits in front of the
  * core-request input.
  *
- * Mirrors VX_cache_init.sv.
+ * Mirrors VX_cache_init.sv exactly.
  *
  * When a flush request arrives on any core bus input, this module:
- *   1. (optionally) waits for any in-flight requests to drain
- *   2. asserts flush_begin for one cycle to each bank
- *   3. waits for all banks to assert flush_end
- *   4. releases the originating flush request(s) to the output
+ *   1. (optionally) waits for in-flight requests to drain (STATE_WAIT1)
+ *   2. asserts flush_begin for one cycle to all banks (STATE_FLUSH)
+ *   3. waits for all banks to assert flush_end (STATE_WAIT2)
+ *   4. releases the originating flush request(s) to the output (STATE_DONE)
  *
- * Parameters:
- *   numReqs          – number of core request lanes (NUM_REQS)
- *   numBanks         – number of cache banks
- *   tagWidth         – core request tag width (includes UUID field)
- *   uuidWidth        – width of the UUID sub-field (may be 0)
- *   bankSelLatency   – pipeline stages between core-bus output and bank
- *                      (BANK_SEL_LATENCY); when 0, in-flight tracking is skipped
+ * SV STATE_IDLE=0, STATE_WAIT1=1, STATE_FLUSH=2, STATE_WAIT2=3, STATE_DONE=4
  *
- * The MEM_REQ_FLAG_FLUSH bit is bit 0 of the flags field (matches the SV).
+ * VX_pending_size tracks in-flight requests between core-bus output and
+ * bank pipeline; it uses saturating arithmetic (clamped increment/decrement).
+ *
+ * MEM_REQ_FLAG_FLUSH is the flush flag bit position in the flags field.
  */
 class CacheInit(
   numReqs:        Int,
   numBanks:       Int,
   tagWidth:       Int,
-  uuidWidth:      Int  = 0,
-  bankSelLatency: Int  = 1,
-  dataSize:       Int  = 4,   // word size in bytes (for MemBusBundle sizing)
-  addrWidth:      Int  = 28,
-  flagsWidth:     Int  = 3
+  uuidWidth:      Int = 1,
+  bankSelLatency: Int = 1,
+  dataSize:       Int = 4,
+  addrWidth:      Int = 28,
+  flagsWidth:     Int = 3
 ) extends Module {
 
   val io = IO(new Bundle {
-    // Core bus – slave side (from requester)
     val core_bus_in  = Vec(numReqs, Flipped(new MemBusBundle(dataSize, addrWidth, flagsWidth, tagWidth, uuidWidth)))
-    // Core bus – master side (to cache)
     val core_bus_out = Vec(numReqs, new MemBusBundle(dataSize, addrWidth, flagsWidth, tagWidth, uuidWidth))
-    // Bank interaction
     val bank_req_fire = Input(UInt(numBanks.W))
     val flush_begin   = Output(UInt(numBanks.W))
     val flush_uuid    = Output(UInt(math.max(1, uuidWidth).W))
@@ -70,39 +65,58 @@ class CacheInit(
   val STATE_WAIT2 = 3.U(3.W)
   val STATE_DONE  = 4.U(3.W)
 
-  val state      = RegInit(STATE_IDLE)
-  val flush_done = RegInit(0.U(numBanks.W))
+  val state         = RegInit(STATE_IDLE)
+  val flush_done    = RegInit(0.U(numBanks.W))
   val lock_released = RegInit(0.U(numReqs.W))
   val flush_uuid_r  = RegInit(0.U(math.max(1, uuidWidth).W))
 
   // ---- detect flush request -----------------------------------------------
-  // MEM_REQ_FLAG_FLUSH is flags bit 0
-  val flush_req_mask = Wire(UInt(numReqs.W))
-  flush_req_mask := VecInit((0 until numReqs).map { i =>
-    io.core_bus_in(i).req.valid && io.core_bus_in(i).req.bits.flags(0)
+  // SV: assign flush_req_mask[i] = core_bus_in_if[i].req_valid &&
+  //                                 core_bus_in_if[i].req_data.flags[MEM_REQ_FLAG_FLUSH];
+  val flush_req_mask = VecInit((0 until numReqs).map { i =>
+    io.core_bus_in(i).req.valid && io.core_bus_in(i).req.bits.flags(MEM_REQ_FLAG_FLUSH)
   }).asUInt
   val flush_req_enable = flush_req_mask.orR
 
-  // ---- in-flight request counter (only when bankSelLatency != 0) -----------
+  // ---- in-flight request counter -------------------------------------------
+  // SV: if (BANK_SEL_LATENCY != 0) instantiate VX_pending_size
+  //     else                        assign no_inflight_reqs = 0
   val no_inflight_reqs = Wire(Bool())
+
   if (bankSelLatency != 0) {
-    // Count requests that fire out vs those that arrive at the bank.
-    val outCnt  = PopCount(VecInit((0 until numReqs).map { i =>
+    // SV: incr = core_bus_out_cnt (pop-count of output fires)
+    //     decr = bank_req_cnt    (pop-count of bank arrivals)
+    // VX_pending_size uses saturating arithmetic; SIZE = BANK_SEL_LATENCY * NUM_BANKS.
+    val maxPending = bankSelLatency * numBanks
+    val cntWidth   = log2Ceil(maxPending + 1) + 1   // extra bit to detect overflow
+
+    val core_bus_out_fire = VecInit((0 until numReqs).map { i =>
       io.core_bus_out(i).req.valid && io.core_bus_out(i).req.ready
-    }).asUInt)
+    }).asUInt
+    val outCnt  = PopCount(core_bus_out_fire)
     val bankCnt = PopCount(io.bank_req_fire)
 
-    // Pending size tracker: incremented by outCnt, decremented by bankCnt.
-    // Max pending = bankSelLatency * numBanks
-    val maxPending = bankSelLatency * numBanks
-    val pending    = RegInit(0.U(log2Ceil(maxPending + 1).W))
-    pending := pending + outCnt - bankCnt
+    // Saturating counter: clamp to [0, maxPending].
+    val pending = RegInit(0.U(cntWidth.W))
+    val next_p  = pending +& outCnt   // widen to avoid overflow
+    val sub_p   = next_p  - bankCnt
+    // Saturate: if subtraction would underflow (bankCnt > next_p) → 0
+    //           if addition would overflow (next_p > maxPending) → maxPending
+    val saturated = Mux(next_p < bankCnt.asUInt,   0.U(cntWidth.W),
+                    Mux(sub_p  > maxPending.U,      maxPending.U(cntWidth.W),
+                        sub_p))
+    pending := saturated
     no_inflight_reqs := (pending === 0.U)
   } else {
+    // SV: assign no_inflight_reqs = 0 (note: the SV says 0, not 1!)
+    // This means when bankSelLatency==0 we never wait in STATE_WAIT1,
+    // but the FSM also never enters STATE_WAIT1 in that case (it goes
+    // directly from IDLE→FLUSH when bankSelLatency==0).
     no_inflight_reqs := false.B
   }
 
   // ---- UUID capture --------------------------------------------------------
+  // SV: for (i) core_bus_out_uuid[i] = UUID_WIDTH ? core_bus_in_if[i].req_data.tag.uuid : 0
   val core_bus_out_uuid = Wire(Vec(numReqs, UInt(math.max(1, uuidWidth).W)))
   for (i <- 0 until numReqs) {
     if (uuidWidth != 0) {
@@ -113,17 +127,26 @@ class CacheInit(
   }
 
   // ---- core bus pass-through (with lock) -----------------------------------
+  // SV:
+  //   input_enable = ~flush_req_enable || lock_released[i];
+  //   core_bus_out.req_valid = core_bus_in.req_valid && input_enable;
+  //   core_bus_out.req_data  = core_bus_in.req_data;
+  //   core_bus_in.req_ready  = core_bus_out.req_ready && input_enable;
+  //   core_bus_in.rsp_*      = core_bus_out.rsp_*;
   for (i <- 0 until numReqs) {
     val input_enable = !flush_req_enable || lock_released(i)
     io.core_bus_out(i).req.valid := io.core_bus_in(i).req.valid && input_enable
     io.core_bus_out(i).req.bits  := io.core_bus_in(i).req.bits
     io.core_bus_in(i).req.ready  := io.core_bus_out(i).req.ready && input_enable
 
-    // response path pass-through
     io.core_bus_in(i).rsp.valid  := io.core_bus_out(i).rsp.valid
     io.core_bus_in(i).rsp.bits   := io.core_bus_out(i).rsp.bits
     io.core_bus_out(i).rsp.ready := io.core_bus_in(i).rsp.ready
   }
+
+  val core_bus_out_ready = VecInit((0 until numReqs).map { i =>
+    io.core_bus_out(i).req.ready
+  }).asUInt
 
   // ---- FSM -----------------------------------------------------------------
   val state_n         = WireDefault(state)
@@ -131,16 +154,18 @@ class CacheInit(
   val lock_released_n = WireDefault(lock_released)
   val flush_uuid_n    = WireDefault(flush_uuid_r)
 
-  val core_bus_out_ready = VecInit((0 until numReqs).map { i =>
-    io.core_bus_out(i).req.ready
-  }).asUInt
-
   switch (state) {
+    // STATE_IDLE (default)
     is (STATE_IDLE) {
       when (flush_req_enable) {
+        // SV: state_n = (BANK_SEL_LATENCY != 0) ? STATE_WAIT1 : STATE_FLUSH;
         state_n := Mux((bankSelLatency != 0).B, STATE_WAIT1, STATE_FLUSH)
-        // Capture UUID from highest-index flush requester
-        for (i <- 0 until numReqs) {
+        // Capture UUID: SV iterates i from NUM_REQS-1 downto 0 with if(flush_req_mask[i]),
+        // so the LOWEST-index match that fires wins (last assignment in loop wins for
+        // decreasing i — the lowest index has the last write).
+        // SV code: for (integer i = NUM_REQS-1; i >= 0; --i) if (flush_req_mask[i]) flush_uuid_n = ...
+        // This means index 0 has priority (last write wins in a for loop going high→low).
+        for (i <- (numReqs - 1) to 0 by -1) {
           when (flush_req_mask(i)) {
             flush_uuid_n := core_bus_out_uuid(i)
           }
@@ -153,28 +178,34 @@ class CacheInit(
       }
     }
     is (STATE_FLUSH) {
-      // One-cycle pulse; immediately move to WAIT2
+      // Generate a flush request pulse (one cycle), then immediately go to WAIT2
       state_n := STATE_WAIT2
     }
     is (STATE_WAIT2) {
+      // SV: flush_done_n = flush_done | flush_end;
+      //     if (flush_done_n == {NUM_BANKS{1'b1}}) { state_n=DONE; flush_done_n='0; lock_released_n=flush_req_mask; }
       val next_flush_status = flush_done | io.flush_end
-
-      when (next_flush_status.andR) {
+      flush_done_n := next_flush_status
+      when (next_flush_status === Fill(numBanks, 1.U)) {
         state_n         := STATE_DONE
         flush_done_n    := 0.U
         lock_released_n := flush_req_mask
-      }.otherwise {
-        flush_done_n    := next_flush_status
       }
     }
     is (STATE_DONE) {
+      // SV: lock_released_n = lock_released & ~core_bus_out_ready;
+      //     if (lock_released_n == 0) state_n = STATE_IDLE;
       lock_released_n := lock_released & ~core_bus_out_ready
-      when (lock_released_n === 0.U) {
+      when ((lock_released & ~core_bus_out_ready) === 0.U) {
         state_n := STATE_IDLE
       }
     }
   }
 
+  // SV sequential block:
+  //   if (reset) { state<=IDLE; flush_done<='0; lock_released<='0; }
+  //   else       { state<=state_n; flush_done<=flush_done_n; lock_released<=lock_released_n; }
+  //   flush_uuid_r <= flush_uuid_n;   // unconditional (no reset)
   when (reset.asBool) {
     state         := STATE_IDLE
     flush_done    := 0.U
@@ -187,6 +218,7 @@ class CacheInit(
   flush_uuid_r := flush_uuid_n
 
   // ---- outputs -------------------------------------------------------------
+  // SV: assign flush_begin = {NUM_BANKS{state == STATE_FLUSH}};
   io.flush_begin := Fill(numBanks, (state === STATE_FLUSH).asUInt)
   io.flush_uuid  := flush_uuid_r
 }

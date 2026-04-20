@@ -12,7 +12,6 @@
 // limitations under the License.
 
 // Chisel translations of:
-//   VX_cache_top.sv    → CacheTop
 //   VX_cache_wrap.sv   → CacheWrap
 //   VX_cache_cluster.sv → CacheCluster
 
@@ -26,17 +25,11 @@ import chisel3.util._
 //
 // Mirrors VX_cache_wrap.sv.
 //
-// Adds optional bypass (NC_ENABLE / PASSTHRU) around the Cache core.
-// When passthru=true the Cache is not instantiated and all requests go
-// directly through CacheBypass.
-//
 // Parameters:
 //   p            – CacheParams
 //   numReqs      – NUM_REQS
 //   memPorts     – MEM_PORTS
 //   tagSelIdx    – TAG_SEL_IDX
-//   ncEnable     – NC_ENABLE
-//   passthru     – PASSTHRU
 //   crsqSize/etc – queue depths
 //   tagWidth     – TAG_WIDTH
 //   uuidWidth    – UUID sub-field width
@@ -48,43 +41,32 @@ class CacheWrap(
   numReqs:    Int = 4,
   memPorts:   Int = 1,
   tagSelIdx:  Int = 0,
-  ncEnable:   Boolean = false,
-  passthru:   Boolean = false,
   crsqSize:   Int = 4,
   mshrSize:   Int = 16,
   mrsqSize:   Int = 4,
   mreqSize:   Int = 4,
   tagWidth:   Int = 8,
-  uuidWidth:  Int = 0,
+  uuidWidth:  Int = 1,
   coreOutBuf: Int = 3,
   memOutBuf:  Int = 3
 ) extends Module {
 
-  private val numBanks       = p.numBanks
   private val lineSize       = p.lineSize
   private val wordSize       = p.wordSize
-  private val lineWidth      = p.lineWidth
   private val memAddrWidthCS = p.memAddrWidthCS
   private val flagsWidth     = 3
   private val mshrAddrWidth  = math.max(1, log2Ceil(mshrSize))
   private val bankSelBits    = p.bankSelBits
-  private val bankMemTagWidth = uuidWidth + mshrAddrWidth
-  // cache mem tag width (without bypass)
-  private val cacheMTagWidth = bankMemTagWidth + bankSelBits
-  // bypass tag width  (simplified; see CacheBypass)
-  private val bypassTagWidth = uuidWidth + tagWidth + (if (p.wordsPerLine > 1) log2Ceil(p.wordsPerLine) else 0)
-  private val memTagWidth    = if (passthru) bypassTagWidth
-                               else if (ncEnable) math.max(cacheMTagWidth, bypassTagWidth) + 1
-                               else cacheMTagWidth
+  // SV: CACHE_MEM_TAG_WIDTH = UUID_WIDTH + CLOG2(MSHR_SIZE) + CLOG2(NUM_BANKS)
+  private val cacheMTagWidth = uuidWidth + mshrAddrWidth + bankSelBits
+  private val memTagWidth    = cacheMTagWidth
 
   val io = IO(new Bundle {
     val core_bus = Vec(numReqs, Flipped(new MemBusBundle(wordSize, p.wordAddrWidth, flagsWidth, tagWidth, uuidWidth)))
     val mem_bus  = Vec(memPorts, new MemBusBundle(lineSize, memAddrWidthCS, flagsWidth, memTagWidth, uuidWidth))
   })
 
-  val bypassEnable = ncEnable || passthru
-
-  // ---- wires for the core bus that goes into the cache core ----------------
+  // Direct connections: core_bus → cache → mem_bus (no bypass/NC path)
   val core_bus_cache_valid  = Wire(Vec(numReqs, Bool()))
   val core_bus_cache_rdata  = Wire(Vec(numReqs, new MemBusReqBundle(wordSize, p.wordAddrWidth, flagsWidth, tagWidth, uuidWidth)))
   val core_bus_cache_ready  = Wire(Vec(numReqs, Bool()))
@@ -92,7 +74,6 @@ class CacheWrap(
   val core_bus_cache_rsp_d  = Wire(Vec(numReqs, new MemBusRspBundle(wordSize, tagWidth, uuidWidth)))
   val core_bus_cache_rsp_r  = Wire(Vec(numReqs, Bool()))
 
-  // ---- cache mem bus (before bypass merge) ---------------------------------
   val mem_bus_cache_valid   = Wire(Vec(memPorts, Bool()))
   val mem_bus_cache_req     = Wire(Vec(memPorts, new MemBusReqBundle(lineSize, memAddrWidthCS, flagsWidth, cacheMTagWidth, uuidWidth)))
   val mem_bus_cache_ready   = Wire(Vec(memPorts, Bool()))
@@ -100,200 +81,24 @@ class CacheWrap(
   val mem_bus_cache_rsp_d   = Wire(Vec(memPorts, new MemBusRspBundle(lineSize, cacheMTagWidth, uuidWidth)))
   val mem_bus_cache_rsp_r   = Wire(Vec(memPorts, Bool()))
 
-  if (bypassEnable) {
-    val bypass = Module(new CacheBypass(
-      numReqs       = numReqs,
-      memPorts      = memPorts,
-      tagSelIdx     = tagSelIdx,
-      cacheEnable   = !passthru,
-      wordSize      = wordSize,
-      lineSize      = lineSize,
-      coreAddrWidth = p.wordAddrWidth,
-      coreTagWidth  = tagWidth,
-      memAddrWidth  = memAddrWidthCS,
-      memTagInWidth = cacheMTagWidth,
-      uuidWidth     = uuidWidth,
-      flagsWidth    = flagsWidth
-    ))
-
-    // Core bus in → bypass
-    for (i <- 0 until numReqs) {
-      bypass.io.core_bus_in(i) <> io.core_bus(i)
-    }
-    // Bypass cache path → cache core input
-    for (i <- 0 until numReqs) {
-      core_bus_cache_valid(i) := bypass.io.core_bus_out(i).req.valid
-      core_bus_cache_rdata(i) := bypass.io.core_bus_out(i).req.bits
-      bypass.io.core_bus_out(i).req.ready := core_bus_cache_ready(i)
-      bypass.io.core_bus_out(i).rsp.valid := core_bus_cache_rsp_v(i)
-      bypass.io.core_bus_out(i).rsp.bits  := core_bus_cache_rsp_d(i)
-      core_bus_cache_rsp_r(i) := bypass.io.core_bus_out(i).rsp.ready
-    }
-    // Cache mem bus → bypass mem in
-    for (i <- 0 until memPorts) {
-      bypass.io.mem_bus_in(i).req.valid := mem_bus_cache_valid(i)
-      bypass.io.mem_bus_in(i).req.bits  := mem_bus_cache_req(i)
-      mem_bus_cache_ready(i) := bypass.io.mem_bus_in(i).req.ready
-      mem_bus_cache_rsp_v(i) := bypass.io.mem_bus_in(i).rsp.valid
-      mem_bus_cache_rsp_d(i) := bypass.io.mem_bus_in(i).rsp.bits
-      bypass.io.mem_bus_in(i).rsp.ready := mem_bus_cache_rsp_r(i)
-    }
-    // Bypass mem out → io.mem_bus
-    // Use field-by-field assignment (mirrors ASSIGN_VX_MEM_BUS_IF_EX in VX_define.vh).
-    // The bypass output tag is memTagOutWidth bits while io.mem_bus tag is memTagWidth
-    // bits (one wider for the NC discriminator).  A bulk asTypeOf would reinterpret the
-    // raw bits and shift every field by one position, corrupting addr and all others.
-    for (i <- 0 until memPorts) {
-      io.mem_bus(i).req.valid          := bypass.io.mem_bus_out(i).req.valid
-      io.mem_bus(i).req.bits.rw        := bypass.io.mem_bus_out(i).req.bits.rw
-      io.mem_bus(i).req.bits.addr      := bypass.io.mem_bus_out(i).req.bits.addr
-      io.mem_bus(i).req.bits.data      := bypass.io.mem_bus_out(i).req.bits.data
-      io.mem_bus(i).req.bits.byteen    := bypass.io.mem_bus_out(i).req.bits.byteen
-      io.mem_bus(i).req.bits.flags     := bypass.io.mem_bus_out(i).req.bits.flags
-      io.mem_bus(i).req.bits.tag       := bypass.io.mem_bus_out(i).req.bits.tag.asUInt
-                                          .asTypeOf(io.mem_bus(i).req.bits.tag)
-      bypass.io.mem_bus_out(i).req.ready := io.mem_bus(i).req.ready
-      bypass.io.mem_bus_out(i).rsp.valid := io.mem_bus(i).rsp.valid
-      bypass.io.mem_bus_out(i).rsp.bits.data := io.mem_bus(i).rsp.bits.data
-      bypass.io.mem_bus_out(i).rsp.bits.tag  := io.mem_bus(i).rsp.bits.tag.asUInt
-                                                .asTypeOf(bypass.io.mem_bus_out(i).rsp.bits.tag)
-      io.mem_bus(i).rsp.ready := bypass.io.mem_bus_out(i).rsp.ready
-    }
-  } else {
-    // No bypass: direct connection
-    for (i <- 0 until numReqs) {
-      core_bus_cache_valid(i) := io.core_bus(i).req.valid
-      core_bus_cache_rdata(i) := io.core_bus(i).req.bits
-      io.core_bus(i).req.ready := core_bus_cache_ready(i)
-      io.core_bus(i).rsp.valid := core_bus_cache_rsp_v(i)
-      io.core_bus(i).rsp.bits  := core_bus_cache_rsp_d(i)
-      core_bus_cache_rsp_r(i) := io.core_bus(i).rsp.ready
-    }
-    for (i <- 0 until memPorts) {
-      io.mem_bus(i).req.valid := mem_bus_cache_valid(i)
-      io.mem_bus(i).req.bits  := mem_bus_cache_req(i).asTypeOf(io.mem_bus(i).req.bits)
-      mem_bus_cache_ready(i) := io.mem_bus(i).req.ready
-      mem_bus_cache_rsp_v(i) := io.mem_bus(i).rsp.valid
-      mem_bus_cache_rsp_d(i) := io.mem_bus(i).rsp.bits
-                                  .asTypeOf(mem_bus_cache_rsp_d(i))
-      io.mem_bus(i).rsp.ready := mem_bus_cache_rsp_r(i)
-    }
+  for (i <- 0 until numReqs) {
+    core_bus_cache_valid(i) := io.core_bus(i).req.valid
+    core_bus_cache_rdata(i) := io.core_bus(i).req.bits
+    io.core_bus(i).req.ready := core_bus_cache_ready(i)
+    io.core_bus(i).rsp.valid := core_bus_cache_rsp_v(i)
+    io.core_bus(i).rsp.bits  := core_bus_cache_rsp_d(i)
+    core_bus_cache_rsp_r(i) := io.core_bus(i).rsp.ready
+  }
+  for (i <- 0 until memPorts) {
+    io.mem_bus(i).req.valid := mem_bus_cache_valid(i)
+    io.mem_bus(i).req.bits  := mem_bus_cache_req(i).asTypeOf(io.mem_bus(i).req.bits)
+    mem_bus_cache_ready(i) := io.mem_bus(i).req.ready
+    mem_bus_cache_rsp_v(i) := io.mem_bus(i).rsp.valid
+    mem_bus_cache_rsp_d(i) := io.mem_bus(i).rsp.bits.asTypeOf(mem_bus_cache_rsp_d(i))
+    io.mem_bus(i).rsp.ready := mem_bus_cache_rsp_r(i)
   }
 
-  if (!passthru) {
-    val cache = Module(new Cache(
-      p          = p,
-      numReqs    = numReqs,
-      memPorts   = memPorts,
-      crsqSize   = crsqSize,
-      mshrSize   = mshrSize,
-      mrsqSize   = mrsqSize,
-      mreqSize   = mreqSize,
-      tagWidth   = tagWidth,
-      uuidWidth  = uuidWidth,
-      coreOutBuf = if (bypassEnable) 1 else coreOutBuf,
-      memOutBuf  = if (bypassEnable) 1 else memOutBuf
-    ))
-
-    for (i <- 0 until numReqs) {
-      cache.io.core_bus(i).req.valid := core_bus_cache_valid(i)
-      cache.io.core_bus(i).req.bits  := core_bus_cache_rdata(i)
-      core_bus_cache_ready(i)        := cache.io.core_bus(i).req.ready
-      core_bus_cache_rsp_v(i)        := cache.io.core_bus(i).rsp.valid
-      core_bus_cache_rsp_d(i)        := cache.io.core_bus(i).rsp.bits
-      cache.io.core_bus(i).rsp.ready := core_bus_cache_rsp_r(i)
-    }
-    for (i <- 0 until memPorts) {
-      mem_bus_cache_valid(i) := cache.io.mem_bus(i).req.valid
-      mem_bus_cache_req(i)   := cache.io.mem_bus(i).req.bits
-                                  .asTypeOf(mem_bus_cache_req(i))
-      cache.io.mem_bus(i).req.ready := mem_bus_cache_ready(i)
-      cache.io.mem_bus(i).rsp.valid := mem_bus_cache_rsp_v(i)
-      cache.io.mem_bus(i).rsp.bits  := mem_bus_cache_rsp_d(i)
-                                        .asTypeOf(cache.io.mem_bus(i).rsp.bits)
-      mem_bus_cache_rsp_r(i) := cache.io.mem_bus(i).rsp.ready
-    }
-  } else {
-    // Passthru: cache core not instantiated; tie off cache side
-    for (i <- 0 until numReqs) {
-      core_bus_cache_ready(i) := false.B
-      core_bus_cache_rsp_v(i) := false.B
-      core_bus_cache_rsp_d(i) := DontCare
-    }
-    for (i <- 0 until memPorts) {
-      mem_bus_cache_valid(i) := false.B
-      mem_bus_cache_req(i)   := DontCare
-      mem_bus_cache_rsp_r(i) := false.B
-    }
-  }
-}
-
-
-// =============================================================================
-// CacheTop
-//
-// Mirrors VX_cache_top.sv.
-//
-// Flat port interface (arrays of scalar/UInt ports) that wraps CacheWrap.
-// Useful as a black-box boundary or for top-level simulation.
-// =============================================================================
-class CacheTop(
-  p:          CacheParams,
-  numReqs:    Int = 4,
-  memPorts:   Int = 1,
-  crsqSize:   Int = 8,
-  mshrSize:   Int = 16,
-  mrsqSize:   Int = 8,
-  mreqSize:   Int = 8,
-  tagWidth:   Int = 32,
-  uuidWidth:  Int = 0,
-  coreOutBuf: Int = 3,
-  memOutBuf:  Int = 3
-) extends Module {
-
-  private val lineSize       = p.lineSize
-  private val wordSize       = p.wordSize
-  private val wordWidth      = p.wordWidth
-  private val lineWidth      = p.lineWidth
-  private val wordAddrWidth  = p.wordAddrWidth
-  private val memAddrWidthCS = p.memAddrWidthCS
-  private val flagsWidth     = 3
-  private val mshrAddrWidth  = math.max(1, log2Ceil(mshrSize))
-  private val bankSelBits    = p.bankSelBits
-  private val bankMemTagWidth = uuidWidth + mshrAddrWidth
-  private val memTagWidth    = bankMemTagWidth + bankSelBits
-
-  val io = IO(new Bundle {
-    // Core request
-    val core_req_valid  = Input(Vec(numReqs, Bool()))
-    val core_req_rw     = Input(Vec(numReqs, Bool()))
-    val core_req_byteen = Input(Vec(numReqs, UInt(wordSize.W)))
-    val core_req_addr   = Input(Vec(numReqs, UInt(wordAddrWidth.W)))
-    val core_req_flags  = Input(Vec(numReqs, UInt(flagsWidth.W)))
-    val core_req_data   = Input(Vec(numReqs, UInt(wordWidth.W)))
-    val core_req_tag    = Input(Vec(numReqs, UInt(tagWidth.W)))
-    val core_req_ready  = Output(Vec(numReqs, Bool()))
-    // Core response
-    val core_rsp_valid  = Output(Vec(numReqs, Bool()))
-    val core_rsp_data   = Output(Vec(numReqs, UInt(wordWidth.W)))
-    val core_rsp_tag    = Output(Vec(numReqs, UInt(tagWidth.W)))
-    val core_rsp_ready  = Input(Vec(numReqs, Bool()))
-    // Memory request
-    val mem_req_valid   = Output(Vec(memPorts, Bool()))
-    val mem_req_rw      = Output(Vec(memPorts, Bool()))
-    val mem_req_byteen  = Output(Vec(memPorts, UInt(lineSize.W)))
-    val mem_req_addr    = Output(Vec(memPorts, UInt(memAddrWidthCS.W)))
-    val mem_req_data    = Output(Vec(memPorts, UInt(lineWidth.W)))
-    val mem_req_tag     = Output(Vec(memPorts, UInt(memTagWidth.W)))
-    val mem_req_ready   = Input(Vec(memPorts, Bool()))
-    // Memory response
-    val mem_rsp_valid   = Input(Vec(memPorts, Bool()))
-    val mem_rsp_data    = Input(Vec(memPorts, UInt(lineWidth.W)))
-    val mem_rsp_tag     = Input(Vec(memPorts, UInt(memTagWidth.W)))
-    val mem_rsp_ready   = Output(Vec(memPorts, Bool()))
-  })
-
-  val wrap = Module(new CacheWrap(
+  val cache = Module(new Cache(
     p          = p,
     numReqs    = numReqs,
     memPorts   = memPorts,
@@ -307,46 +112,23 @@ class CacheTop(
     memOutBuf  = memOutBuf
   ))
 
-  // Core request
   for (i <- 0 until numReqs) {
-    wrap.io.core_bus(i).req.valid        := io.core_req_valid(i)
-    wrap.io.core_bus(i).req.bits.rw      := io.core_req_rw(i)
-    wrap.io.core_bus(i).req.bits.byteen  := io.core_req_byteen(i)
-    wrap.io.core_bus(i).req.bits.addr    := io.core_req_addr(i)
-    wrap.io.core_bus(i).req.bits.flags   := io.core_req_flags(i).asTypeOf(
-                                             wrap.io.core_bus(i).req.bits.flags)
-    wrap.io.core_bus(i).req.bits.data    := io.core_req_data(i)
-    wrap.io.core_bus(i).req.bits.tag     := io.core_req_tag(i).asTypeOf(
-                                             wrap.io.core_bus(i).req.bits.tag)
-    io.core_req_ready(i)                 := wrap.io.core_bus(i).req.ready
+    cache.io.core_bus(i).req.valid := core_bus_cache_valid(i)
+    cache.io.core_bus(i).req.bits  := core_bus_cache_rdata(i)
+    core_bus_cache_ready(i)        := cache.io.core_bus(i).req.ready
+    core_bus_cache_rsp_v(i)        := cache.io.core_bus(i).rsp.valid
+    core_bus_cache_rsp_d(i)        := cache.io.core_bus(i).rsp.bits
+    cache.io.core_bus(i).rsp.ready := core_bus_cache_rsp_r(i)
   }
-  // Core response
-  for (i <- 0 until numReqs) {
-    io.core_rsp_valid(i)               := wrap.io.core_bus(i).rsp.valid
-    io.core_rsp_data(i)                := wrap.io.core_bus(i).rsp.bits.data
-    io.core_rsp_tag(i)                 := wrap.io.core_bus(i).rsp.bits.tag.asUInt
-    wrap.io.core_bus(i).rsp.ready      := io.core_rsp_ready(i)
-  }
-  // Memory request
   for (i <- 0 until memPorts) {
-    io.mem_req_valid(i)  := wrap.io.mem_bus(i).req.valid
-    io.mem_req_rw(i)     := wrap.io.mem_bus(i).req.bits.rw
-    io.mem_req_byteen(i) := wrap.io.mem_bus(i).req.bits.byteen
-    io.mem_req_addr(i)   := wrap.io.mem_bus(i).req.bits.addr
-    io.mem_req_data(i)   := wrap.io.mem_bus(i).req.bits.data
-    io.mem_req_tag(i)    := wrap.io.mem_bus(i).req.bits.tag.asUInt
-    wrap.io.mem_bus(i).req.ready := io.mem_req_ready(i)
-  }
-  // Memory response
-  for (i <- 0 until memPorts) {
-    wrap.io.mem_bus(i).rsp.valid       := io.mem_rsp_valid(i)
-    wrap.io.mem_bus(i).rsp.bits.data   := io.mem_rsp_data(i)
-    wrap.io.mem_bus(i).rsp.bits.tag    := io.mem_rsp_tag(i).asTypeOf(
-                                          wrap.io.mem_bus(i).rsp.bits.tag)
-    io.mem_rsp_ready(i)                := wrap.io.mem_bus(i).rsp.ready
+    mem_bus_cache_valid(i) := cache.io.mem_bus(i).req.valid
+    mem_bus_cache_req(i)   := cache.io.mem_bus(i).req.bits.asTypeOf(mem_bus_cache_req(i))
+    cache.io.mem_bus(i).req.ready := mem_bus_cache_ready(i)
+    cache.io.mem_bus(i).rsp.valid := mem_bus_cache_rsp_v(i)
+    cache.io.mem_bus(i).rsp.bits  := mem_bus_cache_rsp_d(i).asTypeOf(cache.io.mem_bus(i).rsp.bits)
+    mem_bus_cache_rsp_r(i) := cache.io.mem_bus(i).rsp.ready
   }
 }
-
 
 // =============================================================================
 // CacheCluster
@@ -375,14 +157,12 @@ class CacheCluster(
   mrsqSize:   Int = 4,
   mreqSize:   Int = 4,
   tagWidth:   Int = 8,
-  uuidWidth:  Int = 0,
-  ncEnable:   Boolean = false,
+  uuidWidth:  Int = 1,
   coreOutBuf: Int = 3,
   memOutBuf:  Int = 3
 ) extends Module {
 
   private val numCaches   = math.max(1, numUnits)
-  private val isPassthru  = (numUnits == 0)
   // Tag grows by ARB_SEL_BITS(numInputs, numCaches)
   private val arbSelBits  = if (numInputs > numCaches) log2Ceil((numInputs + numCaches - 1) / numCaches) else 0
   private val arbTagWidth = tagWidth + arbSelBits
@@ -397,7 +177,7 @@ class CacheCluster(
   private val cacheMTagWidth  = bankMemTagWidth + bankSelBits
   private val memAddrWidthCS  = p.memAddrWidthCS
   private val flagsWidth      = 3
-  private val memTagWidth     = cacheMTagWidth   // passthru and NC not implemented here
+  private val memTagWidth     = cacheMTagWidth 
 
   require(numInputs >= numCaches, s"CacheCluster: numInputs ($numInputs) must be >= numCaches ($numCaches)")
 
@@ -525,8 +305,6 @@ class CacheCluster(
       numReqs    = numReqs,
       memPorts   = memPorts,
       tagSelIdx  = tagSelIdx,
-      ncEnable   = ncEnable,
-      passthru   = isPassthru,
       crsqSize   = crsqSize,
       mshrSize   = mshrSize,
       mrsqSize   = mrsqSize,

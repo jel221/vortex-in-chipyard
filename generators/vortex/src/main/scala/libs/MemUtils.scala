@@ -1046,17 +1046,9 @@ class VXMemCoalescer(
   // ---- Index buffer for in-flight read tag storage -------------------------
   // ibuf_data: {tag_id, pmask, offset} for each in-flight request
   val ibufDataWidth = tagIdWidth + numReqs + (numReqs * dataRatioW)
-  // Use Mem (async read) to match the combinational read semantics of VX_index_buffer
-  val ibuf = Mem(queueSize, UInt(ibufDataWidth.W))
-  val ibufValid = RegInit(VecInit(Seq.fill(queueSize)(false.B)))
-  val ibufCount = RegInit(0.U(log2Ceil(queueSize + 1).W))
-
-  // Free-list pointer (simple counter wrapping)
-  val ibufWptr  = RegInit(0.U(queueAddrw.W))
-  val ibufFull  = ibufCount === queueSize.U
-  val ibufEmpty = ibufCount === 0.U
-
-  val ibufWaddr = ibufWptr
+  val ibuf   = Module(new VxIndexBuffer(ibufDataWidth, queueSize))
+  val ibufFull  = ibuf.io.full
+  val ibufWaddr = ibuf.io.writeAddr
   val ibufRaddr = io.out_rsp_tag(queueAddrw - 1, 0)
 
   // ---- Address offsets and seed generation --------------------------------
@@ -1108,32 +1100,6 @@ class VXMemCoalescer(
   val reqDataMerged   = Wire(Vec(outReqs, UInt(dataOutWidth.W)))
 
   for (i <- 0 until outReqs) {
-    val byteenAccum = Wire(Vec(dataRatio, UInt(dataInSize.W)))
-    val dataAccum   = Wire(Vec(dataRatio, UInt(dataInWidth.W)))
-    for (k <- 0 until dataRatio) {
-      byteenAccum(k) := 0.U
-      dataAccum(k)   := 0.U
-    }
-    // Combinational merge: for each sub-lane in this outReq slot, merge
-    // into the position given by its address offset
-    val byteenW = Wire(Vec(dataRatio, UInt(dataInSize.W)))
-    val dataW   = Wire(Vec(dataRatio, UInt(dataInWidth.W)))
-    for (k <- 0 until dataRatio) { byteenW(k) := 0.U; dataW(k) := 0.U }
-
-    for (j <- 0 until dataRatio) {
-      val globalIdx = i * dataRatio + j
-      val offset    = inAddrOffset(globalIdx)
-      val active    = currentPmask(globalIdx)
-      for (k <- 0 until dataInSize) {
-        // byte-level merge: update offset slot when this lane is active and byte-enable is set
-        when (active && io.in_req_byteen(globalIdx)(k)) {
-          byteenW(offset)(k) := true.B
-          // Cannot do dynamic slice assignment; approximate with combinational priority
-        }
-      }
-    }
-    // Due to Chisel limitations with dynamic bit assignment, we use a
-    // fold-left approach for the byte accumulation.
     val finalByteen = Wire(UInt(dataOutSize.W))
     val finalData   = Wire(UInt(dataOutWidth.W))
 
@@ -1262,20 +1228,16 @@ class VXMemCoalescer(
   val ibufDinOffset = VecInit((0 until numReqs).map(k => inAddrOffset(k))).asUInt
   val ibufDin       = Cat(ibufDinTag, ibufDinPmask, ibufDinOffset)
 
-  when (ibufPush) {
-    ibuf.write(ibufWaddr, ibufDin)
-    rspRemMask.write(ibufWaddr, batchValidR)
-    ibufValid(ibufWaddr) := true.B
-    ibufWptr  := ibufWptr + 1.U
-  }
-  when (ibufPop) {
-    ibufValid(ibufRaddr) := false.B
-  }
-  // Update count atomically for simultaneous push/pop
-  ibufCount := ibufCount + ibufPush.asUInt - ibufPop.asUInt
+  ibuf.io.acquireEn := ibufPush
+  ibuf.io.writeData := ibufDin
+  ibuf.io.readAddr  := ibufRaddr
+  ibuf.io.releaseEn := ibufPop
 
-  // ibuf read (combinational)
-  val ibufDout       = ibuf.read(ibufRaddr)
+  when (ibufPush) {
+    rspRemMask.write(ibufWaddr, batchValidR)
+  }
+
+  val ibufDout       = ibuf.io.readData
   val offsetBits     = numReqs * dataRatioW
   val ibufDoutOffset = ibufDout(offsetBits - 1, 0)
   val ibufDoutPmask  = ibufDout(offsetBits + numReqs - 1, offsetBits)

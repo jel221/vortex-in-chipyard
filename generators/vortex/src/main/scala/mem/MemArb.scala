@@ -196,11 +196,18 @@ class MemArb(
       val anyValid = valids.reduce(_ || _)
       io.busIn(inIdx).rsp.valid := anyValid
       io.busIn(inIdx).rsp.bits  := MuxCase(datas(0), (0 until numOutputs).map(j => valids(j) -> datas(j)))
+    }
 
-      // Feed ready back to the selected output
-      for (outIdx <- 0 until numOutputs) {
-        io.busOut(outIdx).rsp.ready := io.busIn(inIdx).rsp.ready && valids(outIdx)
-      }
+    // rsp.ready: for each output port, steer ready back to whichever input the
+    // current response is destined for (determined by the sel bits in the tag).
+    for (outIdx <- 0 until numOutputs) {
+      val rspTag = io.busOut(outIdx).rsp.bits.tag.asUInt
+      val selBits: UInt =
+        if (tagSelIdx == 0)            rspTag(logNumReqs - 1, 0)
+        else if (tagSelIdx >= tagWidth) rspTag(outTagWidth - 1, outTagWidth - logNumReqs)
+        else                            rspTag(tagSelIdx + logNumReqs - 1, tagSelIdx)
+      io.busOut(outIdx).rsp.ready := MuxCase(false.B,
+        (0 until numInputs).map(inIdx => (selBits === inIdx.U) -> io.busIn(inIdx).rsp.ready))
     }
   } else {
     // numInputs <= numOutputs: arbitrate responses from all outputs to inputs

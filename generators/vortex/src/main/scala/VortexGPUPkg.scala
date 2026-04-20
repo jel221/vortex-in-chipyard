@@ -511,7 +511,7 @@ object VortexGPUPkg {
 
   // L1/L2/L3 memory port counts — mirrors VX_gpu_pkg.sv port-count formulas.
   // Moved here from VortexConfigConstants so DCACHE_NUM_REQS is available.
-  val L1_MEM_PORTS: Int = math.min(DCACHE_NUM_BANKS, PLATFORM_MEMORY_NUM_BANKS)
+  val L1_MEM_PORTS: Int = math.min(DCACHE_NUM_REQS, PLATFORM_MEMORY_NUM_BANKS)
   private val _L2_NUM_REQS:  Int = NUM_SOCKETS * L1_MEM_PORTS
   private val _L2_NUM_BANKS: Int = math.min(_L2_NUM_REQS, 16)
   val L2_MEM_PORTS: Int = math.min(_L2_NUM_BANKS, PLATFORM_MEMORY_NUM_BANKS)

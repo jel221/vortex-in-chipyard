@@ -100,7 +100,8 @@ class VxSocket(val socketId: Int = 0) extends Module {
     numInputs  = SOCKET_SIZE,
     numReqs    = 1,
     memPorts   = ICACHE_MEM_PORTS,
-    tagWidth   = ICACHE_TAG_WIDTH
+    tagWidth   = ICACHE_TAG_WIDTH,
+    uuidWidth  = UUID_WIDTH
   ))
 
   // D-cache cluster
@@ -121,7 +122,8 @@ class VxSocket(val socketId: Int = 0) extends Module {
     numInputs  = SOCKET_SIZE,
     numReqs    = DCACHE_NUM_REQS,
     memPorts   = L1_MEM_PORTS,
-    tagWidth   = DCACHE_TAG_WIDTH
+    tagWidth   = DCACHE_TAG_WIDTH,
+    uuidWidth  = UUID_WIDTH
   ))
 
   // Broadcast startup_addr and mpm_class to all cores
@@ -167,45 +169,46 @@ class VxSocket(val socketId: Int = 0) extends Module {
     }
   }
 
-  // Merge icache[0] + dcache[0] into socket mem_bus(0) using a priority arbiter
-  // (icache wins when valid; mirrors VX_socket.sv VX_mem_arb ARBITER="P" TAG_SEL_IDX=0).
-  // Tag layout: { original_value[unified-1:0], arb_bit[0] }  (0=icache, 1=dcache)
-  {
-    val ich = icache.io.mem_bus(0)
-    val dch = dcache.io.mem_bus(0)
-    val out = io.mem_bus(0)
-    val icache_wins = ich.req.valid
 
-    out.req.valid          := ich.req.valid || dch.req.valid
-    out.req.bits.rw        := Mux(icache_wins, false.B,                dch.req.bits.rw)
-    out.req.bits.addr      := Mux(icache_wins, ich.req.bits.addr,      dch.req.bits.addr)
-    out.req.bits.data      := Mux(icache_wins, ich.req.bits.data,      dch.req.bits.data)
-    out.req.bits.byteen    := Mux(icache_wins, ich.req.bits.byteen,    dch.req.bits.byteen)
-    out.req.bits.flags     := Mux(icache_wins, ich.req.bits.flags,     dch.req.bits.flags)
-    out.req.bits.tag.uuid  := Mux(icache_wins, ich.req.bits.tag.uuid,  dch.req.bits.tag.uuid)
-    out.req.bits.tag.value := Cat(
+  val ich = icache.io.mem_bus(0)
+  val dch = dcache.io.mem_bus(0)
+  val out = io.mem_bus(0)
+  val icache_wins = ich.req.valid
+
+  out.req.valid          := ich.req.valid || dch.req.valid
+  out.req.bits.rw        := Mux(icache_wins, false.B,                dch.req.bits.rw)
+  out.req.bits.addr      := Mux(icache_wins, ich.req.bits.addr,      dch.req.bits.addr)
+  out.req.bits.data      := Mux(icache_wins, ich.req.bits.data,      dch.req.bits.data)
+  out.req.bits.byteen    := Mux(icache_wins, ich.req.bits.byteen,    dch.req.bits.byteen)
+  out.req.bits.flags     := Mux(icache_wins, ich.req.bits.flags,     dch.req.bits.flags)
+  out.req.bits.tag.uuid  := Mux(icache_wins, ich.req.bits.tag.uuid,  dch.req.bits.tag.uuid)
+  out.req.bits.tag.value := Cat(
       Mux(icache_wins,
-        ich.req.bits.tag.value.pad(L1_MEM_TAG_UNIFIED - UUID_WIDTH),
-        dch.req.bits.tag.value.pad(L1_MEM_TAG_UNIFIED - UUID_WIDTH)),
+      ich.req.bits.tag.value.pad(L1_MEM_TAG_UNIFIED - UUID_WIDTH),
+      dch.req.bits.tag.value.pad(L1_MEM_TAG_UNIFIED - UUID_WIDTH)),
       Mux(icache_wins, 0.U(1.W), 1.U(1.W))
-    )
-    ich.req.ready := out.req.ready &&  icache_wins
-    dch.req.ready := out.req.ready && !icache_wins
+  )
+  ich.req.ready := out.req.ready &&  icache_wins
+  dch.req.ready := out.req.ready && !icache_wins
 
-    val rsp_arb_bit = out.rsp.bits.tag.value(0)
-    val rsp_val     = out.rsp.bits.tag.value(L1_MEM_ARB_TAG_WIDTH - UUID_WIDTH - 1, 1)
-    ich.rsp.valid          := out.rsp.valid && !rsp_arb_bit
-    ich.rsp.bits.data      := out.rsp.bits.data
-    ich.rsp.bits.tag.uuid  := out.rsp.bits.tag.uuid
-    ich.rsp.bits.tag.value := rsp_val(ICACHE_MEM_TAG_WIDTH - UUID_WIDTH - 1, 0)
-    dch.rsp.valid          := out.rsp.valid &&  rsp_arb_bit
-    dch.rsp.bits.data      := out.rsp.bits.data
-    dch.rsp.bits.tag.uuid  := out.rsp.bits.tag.uuid
-    dch.rsp.bits.tag.value := rsp_val(L1_MEM_TAG_WIDTH - UUID_WIDTH - 1, 0)
-    out.rsp.ready          := Mux(!rsp_arb_bit, ich.rsp.ready, dch.rsp.ready)
-  }
+  val rsp_arb_bit = out.rsp.bits.tag.value(0)
+  val rsp_val     = out.rsp.bits.tag.value(L1_MEM_ARB_TAG_WIDTH - UUID_WIDTH - 1, 1)
+  ich.rsp.valid          := out.rsp.valid && !rsp_arb_bit
+  ich.rsp.bits.data      := out.rsp.bits.data
+  ich.rsp.bits.tag.uuid  := out.rsp.bits.tag.uuid
+  ich.rsp.bits.tag.value := rsp_val(ICACHE_MEM_TAG_WIDTH - UUID_WIDTH - 1, 0)
+  dch.rsp.valid          := out.rsp.valid &&  rsp_arb_bit
+  dch.rsp.bits.data      := out.rsp.bits.data
+  dch.rsp.bits.tag.uuid  := out.rsp.bits.tag.uuid
+  dch.rsp.bits.tag.value := rsp_val(L1_MEM_TAG_WIDTH - UUID_WIDTH - 1, 0)
+  out.rsp.ready          := Mux(!rsp_arb_bit, ich.rsp.ready, dch.rsp.ready)
 
-  // Ports 1..L1_MEM_PORTS-1: dcache only (arb_bit fixed to 1)
+
+  // Ports 1..L1_MEM_PORTS-1: dcache only.
+  // Mirrors ASSIGN_VX_MEM_BUS_IF_EX(mem_bus_if[i], dcache_mem_bus_if[i],
+  //   L1_MEM_ARB_TAG_WIDTH, DCACHE_MEM_TAG_WIDTH, UUID_WIDTH) where TD > TS:
+  //   req: {uuid, zeros(TD-TS), dcache_value}  → zero-extend value at MSB
+  //   rsp: dcache.value = out.value[TS-UUID-1:0]  → truncate to lower bits
   for (p <- 1 until L1_MEM_PORTS) {
     val dch = dcache.io.mem_bus(p)
     val out = io.mem_bus(p)
@@ -216,13 +219,12 @@ class VxSocket(val socketId: Int = 0) extends Module {
     out.req.bits.byteen    := dch.req.bits.byteen
     out.req.bits.flags     := dch.req.bits.flags
     out.req.bits.tag.uuid  := dch.req.bits.tag.uuid
-    out.req.bits.tag.value := Cat(dch.req.bits.tag.value.pad(L1_MEM_TAG_UNIFIED - UUID_WIDTH), 1.U(1.W))
+    out.req.bits.tag.value := dch.req.bits.tag.value.pad(L1_MEM_ARB_TAG_WIDTH - UUID_WIDTH)
     dch.req.ready          := out.req.ready
-    val rsp_val            = out.rsp.bits.tag.value(L1_MEM_ARB_TAG_WIDTH - UUID_WIDTH - 1, 1)
     dch.rsp.valid          := out.rsp.valid
     dch.rsp.bits.data      := out.rsp.bits.data
     dch.rsp.bits.tag.uuid  := out.rsp.bits.tag.uuid
-    dch.rsp.bits.tag.value := rsp_val(L1_MEM_TAG_WIDTH - UUID_WIDTH - 1, 0)
+    dch.rsp.bits.tag.value := out.rsp.bits.tag.value(L1_MEM_TAG_WIDTH - UUID_WIDTH - 1, 0)
     out.rsp.ready          := dch.rsp.ready
   }
 
@@ -271,8 +273,7 @@ class VxCluster(val clusterId: Int = 0) extends Module {
     numReqs    = L2_NUM_REQS,
     memPorts   = L2_MEM_PORTS,
     tagWidth   = L2_TAG_WIDTH,
-    ncEnable   = true,
-    passthru   = (L2_ENABLED == 0)
+    uuidWidth  = 0,
   ))
 
   for (s <- sockets) {
@@ -313,9 +314,8 @@ class VxCluster(val clusterId: Int = 0) extends Module {
     io.mem_bus(p).req.bits.data      := l2cache.io.mem_bus(p).req.bits.data
     io.mem_bus(p).req.bits.byteen    := l2cache.io.mem_bus(p).req.bits.byteen
     io.mem_bus(p).req.bits.flags     := l2cache.io.mem_bus(p).req.bits.flags
-    val l2memReqTag                   = l2cache.io.mem_bus(p).req.bits.tag.value
-    io.mem_bus(p).req.bits.tag.uuid  := l2memReqTag(L2_MEM_TAG_WIDTH - 1, L2_MEM_TAG_WIDTH - UUID_WIDTH)
-    io.mem_bus(p).req.bits.tag.value := l2memReqTag(L2_MEM_TAG_WIDTH - UUID_WIDTH - 1, 0)
+    io.mem_bus(p).req.bits.tag.uuid  := l2cache.io.mem_bus(p).req.bits.tag.uuid // l2memReqTag(L2_MEM_TAG_WIDTH - 1, L2_MEM_TAG_WIDTH - UUID_WIDTH)
+    io.mem_bus(p).req.bits.tag.value := l2cache.io.mem_bus(p).req.bits.tag.value
     l2cache.io.mem_bus(p).req.ready   := io.mem_bus(p).req.ready
     l2cache.io.mem_bus(p).rsp.valid   := io.mem_bus(p).rsp.valid
     l2cache.io.mem_bus(p).rsp.bits.data      := io.mem_bus(p).rsp.bits.data
@@ -369,8 +369,7 @@ class VortexTop extends Module {
     numReqs    = L3_NUM_REQS,
     memPorts   = L3_MEM_PORTS,
     tagWidth   = L3_TAG_WIDTH,
-    ncEnable   = true,
-    passthru   = (L3_ENABLED == 0)
+    uuidWidth  = 0,
   ))
 
   for (c <- clusters) {
@@ -411,9 +410,8 @@ class VortexTop extends Module {
     io.mem_bus(p).req.bits.data      := l3cache.io.mem_bus(p).req.bits.data
     io.mem_bus(p).req.bits.byteen    := l3cache.io.mem_bus(p).req.bits.byteen
     io.mem_bus(p).req.bits.flags     := l3cache.io.mem_bus(p).req.bits.flags
-    val l3memReqTag                   = l3cache.io.mem_bus(p).req.bits.tag.value
-    io.mem_bus(p).req.bits.tag.uuid  := l3memReqTag(L3_MEM_TAG_WIDTH - 1, L3_MEM_TAG_WIDTH - UUID_WIDTH)
-    io.mem_bus(p).req.bits.tag.value := l3memReqTag(L3_MEM_TAG_WIDTH - UUID_WIDTH - 1, 0)
+    io.mem_bus(p).req.bits.tag.uuid  := l3cache.io.mem_bus(p).req.bits.tag.uuid // l3memReqTag(L3_MEM_TAG_WIDTH - 1, L3_MEM_TAG_WIDTH - UUID_WIDTH)
+    io.mem_bus(p).req.bits.tag.value := l3cache.io.mem_bus(p).req.bits.tag.value //l3memReqTag(L3_MEM_TAG_WIDTH - UUID_WIDTH - 1, 0)
     l3cache.io.mem_bus(p).req.ready   := io.mem_bus(p).req.ready
     l3cache.io.mem_bus(p).rsp.valid   := io.mem_bus(p).rsp.valid
     l3cache.io.mem_bus(p).rsp.bits.data      := io.mem_bus(p).rsp.bits.data

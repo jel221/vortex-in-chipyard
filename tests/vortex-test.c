@@ -37,7 +37,9 @@
 // ---------------------------------------------------------------------------
 
 // Shared result buffer (in DRAM, accessible by both host and GPU)
-static volatile uint32_t result_buf[4] __attribute__((aligned(64)));
+static volatile uint32_t result_buf[4] __attribute__((aligned(64))) = {
+    0xCCCCCCCC, 0xCCCCCCCC, 0xCCCCCCCC, 0xCCCCCCCC
+};
 
 // Sentinel the kernel is expected to write
 #define KERNEL_SENTINEL  0xDEADBEEFu
@@ -56,7 +58,7 @@ static inline void vx_tmc(int thread_mask) {
 __attribute__((noinline, section(".text.kernel")))
 static void kernel_entry(uint32_t *buf)
 {
-    buf[0] = KERNEL_SENTINEL;
+    result_buf[0] = KERNEL_SENTINEL;
     asm volatile ("fence" ::: "memory");
     vx_tmc(0);
 }
@@ -83,8 +85,6 @@ static inline void vortex_launch(uintptr_t startup_addr, uintptr_t startup_arg)
 // ---------------------------------------------------------------------------
 int main(void)
 {
-    result_buf[0] = 0;
-
     // Pass the kernel entry point as startup_addr and the buffer pointer as
     // startup_arg.  The VortexRoCC state machine writes these to
     // DCR 0x001 (STARTUP_ADDR0) and DCR 0x003 (STARTUP_ARG0) respectively,

@@ -90,10 +90,12 @@ class CacheTags(p: CacheParams) extends Module {
     val line_rdata = tag_ram.read(io.line_idx_n, !io.stall)
 
     // ---- RDW (read-during-write) hazard registers --------------------------
-    // rdw_fill: asserted the cycle after do_fill fired
-    val rdw_fill = RegNext(do_fill && !io.stall, false.B)
+    // rdw_fill: plain register of do_fill (SV: `BUFFER(rdw_fill, do_fill))
+    // The fill input already has !pipe_stall gating at the bank level;
+    // adding !io.stall here would double-gate the stall (Bug #2 fix).
+    val rdw_fill = RegNext(do_fill, false.B)
     // rdw_write: asserted the cycle after do_write fired to the same line
-    val rdw_write = RegNext(do_write && !io.stall && (io.line_idx === io.line_idx_n), false.B)
+    val rdw_write = RegNext(do_write && (io.line_idx === io.line_idx_n), false.B)
 
     // Unpack rdata
     if (p.writeback != 0) {
