@@ -279,26 +279,34 @@ class VxOpcUnitBB(
   val rs2Data = VecInit(regFile.map(_.read(rs2Addr, sbFire)))
   val rs3Data = VecInit(regFile.map(_.read(rs3Addr, sbFire)))
 
+  val s1Rs1Zero = Reg(Bool())
+  val s1Rs2Zero = Reg(Bool())
+  val s1Rs3Zero = Reg(Bool())
+
   // Latch metadata on accept; clear on consume
   when (sbFire) {
-    s1Valid  := true.B
-    s1Uuid   := io.sb_uuid
-    s1Wis    := io.sb_wis
-    s1Tmask  := io.sb_tmask(SIMD_WIDTH - 1, 0)
-    s1PC     := io.sb_PC
-    s1ExType := io.sb_ex_type
-    s1OpType := io.sb_op_type
-    s1OpArgs := io.sb_op_args
-    s1Wb     := io.sb_wb
-    s1Rd     := io.sb_rd
-    s1Sop    := true.B
-    s1Eop    := true.B
+    s1Valid   := true.B
+    s1Uuid    := io.sb_uuid
+    s1Wis     := io.sb_wis
+    s1Tmask   := io.sb_tmask(SIMD_WIDTH - 1, 0)
+    s1PC      := io.sb_PC
+    s1ExType  := io.sb_ex_type
+    s1OpType  := io.sb_op_type
+    s1OpArgs  := io.sb_op_args
+    s1Wb      := io.sb_wb
+    s1Rd      := io.sb_rd
+    s1Rs1Zero := (io.sb_rs1 === 0.U)
+    s1Rs2Zero := (io.sb_rs2 === 0.U)
+    s1Rs3Zero := (io.sb_rs3 === 0.U)
+    s1Sop     := true.B
+    s1Eop     := true.B
   } .elsewhen (io.opd_ready) {
     s1Valid  := false.B
   }
 
   // -------------------------------------------------------------------------
   // Output (data from SyncReadMem is available the cycle after sbFire)
+  // x0 is hardwired to 0: SyncReadMem has no reset init so gate on index=0.
   // -------------------------------------------------------------------------
   io.opd_valid    := s1Valid
   io.opd_uuid     := s1Uuid
@@ -311,9 +319,9 @@ class VxOpcUnitBB(
   io.opd_op_args  := s1OpArgs
   io.opd_wb       := s1Wb
   io.opd_rd       := s1Rd
-  io.opd_rs1_data := rs1Data
-  io.opd_rs2_data := rs2Data
-  io.opd_rs3_data := rs3Data
+  io.opd_rs1_data := VecInit(rs1Data.map(d => Mux(s1Rs1Zero, 0.U(XLEN.W), d)))
+  io.opd_rs2_data := VecInit(rs2Data.map(d => Mux(s1Rs2Zero, 0.U(XLEN.W), d)))
+  io.opd_rs3_data := VecInit(rs3Data.map(d => Mux(s1Rs3Zero, 0.U(XLEN.W), d)))
   io.opd_sop      := s1Sop
   io.opd_eop      := s1Eop
 

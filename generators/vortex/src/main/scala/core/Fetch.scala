@@ -57,7 +57,8 @@ class VxFetch extends Module {
   // -------------------------------------------------------------------------
   // Tag store: maps NW_WIDTH warp-ID → {PC, tmask} for in-flight requests
   // -------------------------------------------------------------------------
-  val tagMem = SyncReadMem(NUM_WARPS, UInt((PC_BITS + NUM_THREADS).W))
+  // VX_dp_ram with LUTRAM=1 uses asynchronous (combinational) reads — use Mem, not SyncReadMem.
+  val tagMem = Mem(NUM_WARPS, UInt((PC_BITS + NUM_THREADS).W))
 
   val reqTag  = io.schedule_wid
   val icacheReqFire = Wire(Bool())
@@ -71,7 +72,8 @@ class VxFetch extends Module {
   val rspUuid = io.icache_rsp_tag(icacheTagW - 1, NW_WIDTH)
   val rspTag  = io.icache_rsp_tag(NW_WIDTH - 1, 0)
 
-  val rspData = tagMem.read(rspTag, io.icache_rsp_valid)
+  // Combinational read — valid in the same cycle as icache_rsp_valid
+  val rspData  = tagMem.read(rspTag)
   val rspPC    = rspData(PC_BITS + NUM_THREADS - 1, NUM_THREADS)
   val rspTmask = rspData(NUM_THREADS - 1, 0)
 
