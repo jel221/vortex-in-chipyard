@@ -18,6 +18,36 @@ package vortex
 import chisel3._
 import chisel3.util._
 
+class CacheMemReqArbBundle(
+  val addrW:   Int,
+  val dataW:   Int,
+  val byteenW: Int,
+  val flagsW:  Int,
+  val tagW:    Int
+) extends Bundle {
+  val rw     = Bool()
+  val addr   = UInt(addrW.W)
+  val data   = UInt(dataW.W)
+  val byteen = UInt(byteenW.W)
+  val flags  = UInt(flagsW.W)
+  val tag    = UInt(tagW.W)
+}
+
+class CacheMemReqBufBundle(
+  val byteenW: Int,
+  val addrW:   Int,
+  val dataW:   Int,
+  val tagW:    Int,
+  val flagsW:  Int
+) extends Bundle {
+  val rw     = Bool()
+  val byteen = UInt(byteenW.W)
+  val addr   = UInt(addrW.W)
+  val data   = UInt(dataW.W)
+  val tag    = UInt(tagW.W)
+  val flags  = UInt(flagsW.W)
+}
+
 /**
  * Cache – top-level multi-bank cache (without bypass/NC logic).
  *
@@ -442,89 +472,74 @@ for (r <- 0 until numReqs) {
   // Output goes through VX_elastic_buffer (mem_req_buf).
   // =========================================================================
 
-  val mem_req_rr = RegInit(VecInit.fill(memPorts)(0.U(math.max(1, log2Ceil(numBanks)).W)))
+  val memReqArb = Module(new VxStreamArb(
+    new CacheMemReqArbBundle(lineAddrWidth, lineWidth, lineSize, math.max(1, flagsWidth), bankMemTagWidth),
+    numInputs  = numBanks,
+    numOutputs = memPorts,
+    arbiter    = "R",
+    outBuf     = 0
+  ))
+
+  for (b <- 0 until numBanks) {
+    val d = Wire(new CacheMemReqArbBundle(lineAddrWidth, lineWidth, lineSize, math.max(1, flagsWidth), bankMemTagWidth))
+    d.rw     := pb_mem_req_rw(b)
+    d.addr   := pb_mem_req_addr(b)
+    d.data   := pb_mem_req_data(b)
+    d.byteen := pb_mem_req_byteen(b)
+    d.flags  := pb_mem_req_flags(b)
+    d.tag    := pb_mem_req_tag(b)
+    memReqArb.io.validIn(b) := pb_mem_req_valid(b)
+    memReqArb.io.dataIn(b)  := d
+    pb_mem_req_ready(b)     := memReqArb.io.readyIn(b)
+  }
 
   for (pi <- 0 until memPorts) {
-    val base = mem_req_rr(pi)
+    val arbOut = memReqArb.io.dataOut(pi)
 
-    // Round-robin selection of a bank for this port.
-    // In the SV, VX_stream_arb distributes numBanks across memPorts in a
-    // round-robin fashion with one winner per port per cycle.
-    val rotated = Wire(Vec(numBanks, Bool()))
-    for (i <- 0 until numBanks) {
-      rotated(i) := pb_mem_req_valid(((base + i.U) % numBanks.U).asUInt)
-    }
-    val winner_rot = PriorityEncoder(rotated.asUInt)
-    val winner_b   = ((base + winner_rot) % numBanks.U).asUInt
-    val winner_val = rotated.asUInt.orR
-    // SV: mem_req_sel_out[i] = arbiter-selected bank index within this port's slice
-    // = winner_b / memPorts (which bank within the ones assigned to this port)
-    // For simplicity we use winner_b directly as the arb-sel.
-    val arb_sel = winner_b(memArbSelBits - 1, 0)
-
-    // Build full memory address and tag (with bank-id embedded)
     val mem_req_addr_w = Wire(UInt(memAddrWidthCS.W))
     val mem_req_tag_w  = Wire(UInt(memTagWidth.W))
 
     if (numBanks > 1) {
       if (numBanks != memPorts) {
-        // bank_id = Cat(arb_sel, port_sel)
-        val bank_id = Cat(arb_sel, pi.U(memPortsSelBits.W))(bankSelBits - 1, 0)
-        mem_req_addr_w := Cat(pb_mem_req_addr(winner_b), bank_id)(memAddrWidthCS - 1, 0)
-        // SV: mem_req_tag_w = {mem_req_tag, mem_req_sel_out[i]}
-        mem_req_tag_w  := Cat(pb_mem_req_tag(winner_b), arb_sel)(memTagWidth - 1, 0)
+        // selOut(pi) = group index r; actual bank = r * memPorts + pi
+        val selOut  = memReqArb.io.selOut(pi)
+        val bank_id = Cat(selOut, pi.U(memPortsSelBits.W))(bankSelBits - 1, 0)
+        mem_req_addr_w := Cat(arbOut.addr, bank_id)(memAddrWidthCS - 1, 0)
+        mem_req_tag_w  := Cat(arbOut.tag, selOut)(memTagWidth - 1, 0)
       } else {
-        // NUM_BANKS == MEM_PORTS: each bank maps 1:1 to a port
-        mem_req_addr_w := Cat(pb_mem_req_addr(winner_b), pi.U(memPortsSelBits.W))(memAddrWidthCS - 1, 0)
-        // SV: mem_req_tag_w = MEM_TAG_WIDTH'(mem_req_tag)  [zero-extend]
-        mem_req_tag_w  := pb_mem_req_tag(winner_b)(memTagWidth - 1, 0)
+        // NUM_BANKS == MEM_PORTS: 1:1, bank_id = port index
+        mem_req_addr_w := Cat(arbOut.addr, pi.U(memPortsSelBits.W))(memAddrWidthCS - 1, 0)
+        mem_req_tag_w  := arbOut.tag(memTagWidth - 1, 0)
       }
     } else {
-      // Single bank: no bank-id in address or tag
-      mem_req_addr_w := pb_mem_req_addr(winner_b)(memAddrWidthCS - 1, 0)
-      mem_req_tag_w  := pb_mem_req_tag(winner_b)(memTagWidth - 1, 0)
+      mem_req_addr_w := arbOut.addr(memAddrWidthCS - 1, 0)
+      mem_req_tag_w  := arbOut.tag(memTagWidth - 1, 0)
     }
 
-    // Elastic buffer for memory request output
-    val bufSize = if (memReqBufEnable) math.max(1, memOutBuf) else 1
-    val mem_req_buf = Module(new Queue(new Bundle {
-      val rw      = Bool()
-      val byteen  = UInt(lineSize.W)
-      val addr    = UInt(memAddrWidthCS.W)
-      val data    = UInt(lineWidth.W)
-      val tag     = UInt(memTagWidth.W)
-      val flags   = UInt(math.max(1, flagsWidth).W)
-    }, bufSize, pipe = (bufSize <= 1), flow = false))
+    val mem_req_buf = Wire(Decoupled(
+      new CacheMemReqBufBundle(lineSize, memAddrWidthCS, lineWidth, memTagWidth, math.max(1, flagsWidth))
+    ))
 
-    mem_req_buf.io.enq.valid        := winner_val
-    mem_req_buf.io.enq.bits.rw      := pb_mem_req_rw(winner_b)
-    mem_req_buf.io.enq.bits.byteen  := pb_mem_req_byteen(winner_b)
-    mem_req_buf.io.enq.bits.addr    := mem_req_addr_w
-    mem_req_buf.io.enq.bits.data    := pb_mem_req_data(winner_b)
-    mem_req_buf.io.enq.bits.tag     := mem_req_tag_w
-    mem_req_buf.io.enq.bits.flags   := pb_mem_req_flags(winner_b)
+    mem_req_buf.valid       := memReqArb.io.validOut(pi)
+    mem_req_buf.bits.rw     := arbOut.rw
+    mem_req_buf.bits.byteen := arbOut.byteen
+    mem_req_buf.bits.addr   := mem_req_addr_w
+    mem_req_buf.bits.data   := arbOut.data
+    mem_req_buf.bits.tag    := mem_req_tag_w
+    mem_req_buf.bits.flags  := arbOut.flags
+    mem_req_buf.ready       := io.mem_bus(pi).req.ready
 
-    io.mem_bus(pi).req.valid        := mem_req_buf.io.deq.valid
-    io.mem_bus(pi).req.bits.rw      := mem_req_buf.io.deq.bits.rw
-    io.mem_bus(pi).req.bits.byteen  := mem_req_buf.io.deq.bits.byteen
-    io.mem_bus(pi).req.bits.addr    := mem_req_buf.io.deq.bits.addr
-    io.mem_bus(pi).req.bits.data    := mem_req_buf.io.deq.bits.data
-    io.mem_bus(pi).req.bits.tag     := mem_req_buf.io.deq.bits.tag
+    memReqArb.io.readyOut(pi)       := mem_req_buf.ready
+
+    io.mem_bus(pi).req.valid        := mem_req_buf.valid
+    io.mem_bus(pi).req.bits.rw      := mem_req_buf.bits.rw
+    io.mem_bus(pi).req.bits.byteen  := mem_req_buf.bits.byteen
+    io.mem_bus(pi).req.bits.addr    := mem_req_buf.bits.addr
+    io.mem_bus(pi).req.bits.data    := mem_req_buf.bits.data
+    io.mem_bus(pi).req.bits.tag     := mem_req_buf.bits.tag
                                        .asTypeOf(io.mem_bus(pi).req.bits.tag)
-    io.mem_bus(pi).req.bits.flags   := mem_req_buf.io.deq.bits.flags
+    io.mem_bus(pi).req.bits.flags   := mem_req_buf.bits.flags
                                        .asTypeOf(io.mem_bus(pi).req.bits.flags)
-    mem_req_buf.io.deq.ready        := io.mem_bus(pi).req.ready
-
-    // Back-pressure to winning bank
-    for (b <- 0 until numBanks) {
-      when (winner_b === b.U && winner_val) {
-        pb_mem_req_ready(b) := mem_req_buf.io.enq.ready
-      }
-    }
-
-    when (winner_val && mem_req_buf.io.enq.ready) {
-      mem_req_rr(pi) := ((winner_b + 1.U) % numBanks.U).asUInt
-    }
   }
 
   // =========================================================================

@@ -75,7 +75,7 @@ class LsuSlice(instanceId: String = "lsu_slice") extends Module {
     val ex_rd          = Input(UInt(NUM_REGS_BITS.W))
     val ex_rs1_data    = Input(Vec(NUM_LANES, UInt(XLEN.W)))
     val ex_rs2_data    = Input(Vec(NUM_LANES, UInt(XLEN.W)))
-    val ex_lsu_offset  = Input(UInt(OFFSET_BITS.W))     // op_args.lsu.offset
+    val ex_lsu_offset  = Input(SInt(OFFSET_BITS.W))     // op_args.lsu.offset
     val ex_lsu_is_store= Input(Bool())                   // op_args.lsu.is_store
     val ex_pid         = Input(UInt(PID_WIDTH.W))
     val ex_sop         = Input(Bool())
@@ -119,7 +119,7 @@ class LsuSlice(instanceId: String = "lsu_slice") extends Module {
   // Full address = rs1 + sign-extended offset
   // --------------------------------------------------------------------------
   val fullAddr = VecInit(Seq.tabulate(NUM_LANES) { i =>
-    io.ex_rs1_data(i) + io.ex_lsu_offset.asSInt.asUInt
+    (io.ex_rs1_data(i).asSInt + io.ex_lsu_offset).asUInt(XLEN - 1, 0)
   })
 
   // --------------------------------------------------------------------------
@@ -275,34 +275,37 @@ class LsuSlice(instanceId: String = "lsu_slice") extends Module {
   // --------------------------------------------------------------------------
   // No-response buffer enable: stores without writeback, or fence non-EOP packets
   // --------------------------------------------------------------------------
-  val reqSkip         = reqIsFence && !io.ex_eop
-  val noRspBufEnable  = (io.mem_req_rw && !io.ex_wb) || reqSkip
+  val reqSkip        = reqIsFence && !io.ex_eop
+  val noRspBufEnable = (io.mem_req_rw && !io.ex_wb) || reqSkip
 
-  // Simple 2-entry elastic buffer implemented as skid registers
-  // no_rsp_buf: captures uuid/wid/tmask/PC/pid/sop/eop for store/fence completion
-  val noRspBufValid = RegInit(false.B)
-  val noRspBufUuid  = Reg(UInt(UUID_WIDTH.W))
-  val noRspBufWid   = Reg(UInt(NW_WIDTH.W))
-  val noRspBufTmask = Reg(UInt(NUM_LANES.W))
-  val noRspBufPc    = Reg(UInt(PC_BITS.W))
-  val noRspBufPid   = Reg(UInt(PID_WIDTH.W))
-  val noRspBufSop   = Reg(Bool())
-  val noRspBufEop   = Reg(Bool())
-
-  val noRspBufReady = Wire(Bool())
+  // Both buffers use lsu_res_t (ExeResBundle). Stores leave wb=false; rd/data
+  // are don't-care and are never written to the register file.
+  // Declared here so their .ready can be used in execute_ready below.
+  val noRspEnq = Wire(Decoupled(new ExeResBundle(NUM_LANES)))
+  val rspEnq   = Wire(Decoupled(new ExeResBundle(NUM_LANES)))
 
   // Gate mem_req_valid on no-response buffer space
   io.mem_req_valid := io.execute_valid && !reqSkip &&
-    !(noRspBufEnable && !noRspBufReady) &&
+    !(noRspBufEnable && !noRspEnq.ready) &&
     !fenceLock
 
-  val noRspBufValidIn = io.execute_valid &&
+  noRspEnq.valid       := io.execute_valid &&
     noRspBufEnable &&
     (reqSkip || io.mem_req_ready) &&
     !fenceLock
+  noRspEnq.bits.uuid   := io.ex_uuid
+  noRspEnq.bits.wid    := io.ex_wid
+  noRspEnq.bits.tmask  := io.ex_tmask
+  noRspEnq.bits.PC     := io.ex_PC
+  noRspEnq.bits.wb     := false.B
+  noRspEnq.bits.rd     := 0.U
+  noRspEnq.bits.data   := DontCare
+  noRspEnq.bits.pid    := io.ex_pid
+  noRspEnq.bits.sop    := io.ex_sop
+  noRspEnq.bits.eop    := io.ex_eop
 
   io.execute_ready := (io.mem_req_ready || reqSkip) &&
-    !(noRspBufEnable && !noRspBufReady) &&
+    !(noRspBufEnable && !noRspEnq.ready) &&
     !fenceLock
 
   // Wire request signals
@@ -373,79 +376,43 @@ class LsuSlice(instanceId: String = "lsu_slice") extends Module {
   }
 
   // --------------------------------------------------------------------------
-  // Response-path elastic buffer (2-entry)
+  // Response-path elastic buffer — Queue(2, pipe=true) matches VX_elastic_buffer
   // --------------------------------------------------------------------------
-  val rspBufValid = RegInit(false.B)
-  val rspBufUuid  = Reg(UInt(UUID_WIDTH.W))
-  val rspBufWid   = Reg(UInt(NW_WIDTH.W))
-  val rspBufTmask = Reg(UInt(NUM_LANES.W))
-  val rspBufPc    = Reg(UInt(PC_BITS.W))
-  val rspBufWb    = Reg(Bool())
-  val rspBufRd    = Reg(UInt(NUM_REGS_BITS.W))
-  val rspBufData  = Reg(Vec(NUM_LANES, UInt(XLEN.W)))
-  val rspBufPid   = Reg(UInt(PID_WIDTH.W))
-  val rspBufSop   = Reg(Bool())
-  val rspBufEop   = Reg(Bool())
+  rspEnq.valid      := io.mem_rsp_valid
+  rspEnq.bits.uuid  := rspUuid
+  rspEnq.bits.wid   := rspWid
+  rspEnq.bits.tmask := io.mem_rsp_mask
+  rspEnq.bits.PC    := rspPc
+  rspEnq.bits.wb    := rspWb
+  rspEnq.bits.rd    := rspRd
+  rspEnq.bits.data  := rspData
+  rspEnq.bits.pid   := rspPid
+  rspEnq.bits.sop   := memRspSopPkt
+  rspEnq.bits.eop   := memRspEopPkt
+  io.mem_rsp_ready  := rspEnq.ready
 
-  val rspBufReady = Wire(Bool())
-  io.mem_rsp_ready := rspBufReady || !rspBufValid
-
-  when (io.mem_rsp_valid && (rspBufReady || !rspBufValid)) {
-    rspBufValid := true.B
-    rspBufUuid  := rspUuid
-    rspBufWid   := rspWid
-    rspBufTmask := io.mem_rsp_mask
-    rspBufPc    := rspPc
-    rspBufWb    := rspWb
-    rspBufRd    := rspRd
-    rspBufData  := rspData
-    rspBufPid   := rspPid
-    rspBufSop   := memRspSopPkt
-    rspBufEop   := memRspEopPkt
-  }.elsewhen(rspBufReady && rspBufValid) {
-    rspBufValid := false.B
-  }
+  val rspDeq   = Queue(rspEnq,   entries = 2, pipe = true)
+  val noRspDeq = Queue(noRspEnq, entries = 2, pipe = true)
 
   // --------------------------------------------------------------------------
-  // No-response elastic buffer (2-entry)
+  // 2-input priority arbiter (rsp has priority over noRsp)
   // --------------------------------------------------------------------------
-  noRspBufReady := !noRspBufValid || false.B // will be driven by arbiter
-
-  when (noRspBufValidIn && noRspBufReady) {
-    noRspBufValid := true.B
-    noRspBufUuid  := io.ex_uuid
-    noRspBufWid   := io.ex_wid
-    noRspBufTmask := io.ex_tmask
-    noRspBufPc    := io.ex_PC
-    noRspBufPid   := io.ex_pid
-    noRspBufSop   := io.ex_sop
-    noRspBufEop   := io.ex_eop
-  }.elsewhen(!noRspBufReady && noRspBufValid) {
-    // stall
-  }.otherwise {
-    noRspBufValid := false.B
-  }
-
-  // --------------------------------------------------------------------------
-  // 2-input priority arbiter (result_rsp_if has priority)
-  // --------------------------------------------------------------------------
-  // Prioritize rsp buffer over no-rsp buffer (same as ARBITER="P" in SV)
-  val arbRspPri    = rspBufValid
-  val arbNoRspPri  = noRspBufValid && !rspBufValid
+  val arbRspPri   = rspDeq.valid
+  val arbNoRspPri = noRspDeq.valid && !rspDeq.valid
 
   io.result_valid := arbRspPri || arbNoRspPri
 
-  rspBufReady    := io.result_ready && arbRspPri
-  noRspBufReady  := io.result_ready && arbNoRspPri
+  rspDeq.ready   := io.result_ready && arbRspPri
+  noRspDeq.ready := io.result_ready && arbNoRspPri
 
-  io.res_uuid  := Mux(arbRspPri, rspBufUuid,  noRspBufUuid)
-  io.res_wid   := Mux(arbRspPri, rspBufWid,   noRspBufWid)
-  io.res_tmask := Mux(arbRspPri, rspBufTmask, noRspBufTmask)
-  io.res_PC    := Mux(arbRspPri, rspBufPc,    noRspBufPc)
-  io.res_wb    := Mux(arbRspPri, rspBufWb,    false.B)
-  io.res_rd    := Mux(arbRspPri, rspBufRd,    0.U)
-  io.res_data  := Mux(arbRspPri, rspBufData,  rspBufData) // arbiter MUX optimisation: no-rsp reuses rsp data
-  io.res_pid   := Mux(arbRspPri, rspBufPid,   noRspBufPid)
-  io.res_sop   := Mux(arbRspPri, rspBufSop,   noRspBufSop)
-  io.res_eop   := Mux(arbRspPri, rspBufEop,   noRspBufEop)
+  io.res_uuid  := Mux(arbRspPri, rspDeq.bits.uuid,  noRspDeq.bits.uuid)
+  io.res_wid   := Mux(arbRspPri, rspDeq.bits.wid,   noRspDeq.bits.wid)
+  io.res_tmask := Mux(arbRspPri, rspDeq.bits.tmask, noRspDeq.bits.tmask)
+  io.res_PC    := Mux(arbRspPri, rspDeq.bits.PC,    noRspDeq.bits.PC)
+  io.res_wb    := rspDeq.bits.wb   // noRsp always has wb=false; Mux not needed
+  io.res_rd    := rspDeq.bits.rd
+  io.res_data  := rspDeq.bits.data // noRsp data is DontCare; arbitration via wb
+  io.res_pid   := Mux(arbRspPri, rspDeq.bits.pid,   noRspDeq.bits.pid)
+  io.res_sop   := Mux(arbRspPri, rspDeq.bits.sop,   noRspDeq.bits.sop)
+  io.res_eop   := Mux(arbRspPri, rspDeq.bits.eop,   noRspDeq.bits.eop)
 }

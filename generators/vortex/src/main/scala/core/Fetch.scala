@@ -78,46 +78,29 @@ class VxFetch extends Module {
   val rspTmask = rspData(NUM_THREADS - 1, 0)
 
   // -------------------------------------------------------------------------
-  // I-cache request
+  // I-cache request — Queue(2, pipe=true) matches VX_elastic_buffer(SIZE=2, OUT_REG=1)
   // -------------------------------------------------------------------------
-  val icacheReqValid = io.schedule_valid
-
-  // PC to I-cache address: word-aligned, strip low bits
-  // 4-byte aligned → shift by 2; then take icacheAddrW bits
   val icacheReqAddr = io.schedule_PC(PC_BITS - 1, log2Ceil(icacheWordSize))
   val icacheReqTag  = Cat(io.schedule_uuid, reqTag)
 
-  icacheReqFire := icacheReqValid && io.icache_req_ready
-
-  io.schedule_ready := io.icache_req_ready
-
-  // Output register (elastic buffer size=2, out_reg=1)
-  val reqValidReg  = RegInit(false.B)
-  val reqAddrReg   = Reg(UInt(icacheAddrW.W))
-  val reqTagReg    = Reg(UInt(icacheTagW.W))
-
-  // Simple 2-entry elastic buffer
-  val bufFull = RegInit(false.B)
-  val buf2Valid = RegInit(false.B)
-  val buf2Addr  = Reg(UInt(icacheAddrW.W))
-  val buf2Tag   = Reg(UInt(icacheTagW.W))
-
-  // Simple output register
-  val outValid = RegInit(false.B)
-  val outAddr  = Reg(UInt(icacheAddrW.W))
-  val outTag   = Reg(UInt(icacheTagW.W))
-
-  val outFire = outValid && io.icache_req_ready
-
-  when (outFire || !outValid) {
-    outValid := icacheReqValid
-    outAddr  := icacheReqAddr
-    outTag   := icacheReqTag
+  class IcacheReqBundle extends Bundle {
+    val addr = UInt(icacheAddrW.W)
+    val tag  = UInt(icacheTagW.W)
   }
 
-  io.icache_req_valid  := outValid
-  io.icache_req_addr   := outAddr
-  io.icache_req_tag    := outTag
+  val enq = Wire(Decoupled(new IcacheReqBundle))
+  enq.valid      := io.schedule_valid
+  enq.bits.addr  := icacheReqAddr
+  enq.bits.tag   := icacheReqTag
+  io.schedule_ready := enq.ready
+  icacheReqFire     := enq.fire
+
+  val deq = Queue(enq, entries = 2, pipe = true)
+
+  io.icache_req_valid  := deq.valid
+  io.icache_req_addr   := deq.bits.addr
+  io.icache_req_tag    := deq.bits.tag
+  deq.ready            := io.icache_req_ready
   io.icache_req_rw     := false.B
   io.icache_req_byteen := Fill(icacheWordSize, 1.U(1.W))
   io.icache_req_data   := 0.U

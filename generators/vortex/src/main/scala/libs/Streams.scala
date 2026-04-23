@@ -136,10 +136,10 @@ class VxElasticBuffer(
 //   sticky   hold the grant while the granted request stays asserted
 //   outBuf   > 0 inserts an elastic buffer on every output
 // ---------------------------------------------------------------------------
-class VxStreamArb(
+class VxStreamArb[T <: Data](
+  gen:           T,
   val numInputs  : Int    = 1,
   val numOutputs : Int    = 1,
-  val dataw      : Int    = 1,
   val sticky     : Int    = 0,
   val arbiter    : String = "R",
   val outBuf     : Int    = 0
@@ -156,11 +156,11 @@ class VxStreamArb(
 
   val io = IO(new Bundle {
     val validIn  = Input(Vec(numInputs,  Bool()))
-    val dataIn   = Input(Vec(numInputs,  UInt(dataw.W)))
+    val dataIn   = Input(Vec(numInputs,  gen.cloneType))
     val readyIn  = Output(Vec(numInputs, Bool()))
 
     val validOut = Output(Vec(numOutputs, Bool()))
-    val dataOut  = Output(Vec(numOutputs, UInt(dataw.W)))
+    val dataOut  = Output(Vec(numOutputs, gen.cloneType))
     val readyOut = Input(Vec(numOutputs,  Bool()))
 
     // selOut(i) = index within the request group that was selected
@@ -202,13 +202,13 @@ class VxStreamArb(
 
     // Per-output wire buses before the output buffers
     val validOutW = Wire(Vec(numOutputs, Bool()))
-    val dataOutW  = Wire(Vec(numOutputs, UInt(dataw.W)))
+    val dataOutW  = Wire(Vec(numOutputs, gen.cloneType))
     val readyOutW = Wire(Vec(numOutputs, Bool()))
 
     for (o <- 0 until numOutputs) {
       // Collect per-request valid/data for this output
       val validInW = Wire(Vec(numReqs, Bool()))
-      val dataInW  = Wire(Vec(numReqs, UInt(dataw.W)))
+      val dataInW  = Wire(Vec(numReqs, gen.cloneType))
       for (r <- 0 until numReqs) {
         val i = r * numOutputs + o
         if (i < numInputs) {
@@ -216,7 +216,7 @@ class VxStreamArb(
           dataInW(r)  := io.dataIn(i)
         } else {
           validInW(r) := false.B
-          dataInW(r)  := 0.U(dataw.W)
+          dataInW(r)  := 0.U(gen.getWidth.W).asTypeOf(gen)
         }
       }
       // Valid on this output: arbiter has a valid grant and that group has
@@ -243,15 +243,17 @@ class VxStreamArb(
     // Output buffers
     for (o <- 0 until numOutputs) {
       if (outBuf > 0) {
-        val buf = Module(new VxElasticBuffer(dataw = logNumReqs + dataw, size = outBuf))
-        buf.io.validIn := validOutW(o)
-        buf.io.dataIn  := Cat(arbIndex, dataOutW(o))
-        readyOutW(o)   := buf.io.readyIn
-        val outCat      = buf.io.dataOut
-        io.validOut(o) := buf.io.validOut
-        io.dataOut(o)  := outCat(dataw - 1, 0)
-        io.selOut(o)   := outCat(logNumReqs + dataw - 1, dataw)
-        buf.io.readyOut := io.readyOut(o)
+        val bufT = new Bundle { val idx = UInt(numReqsW.W); val data = gen.cloneType }
+        val enq  = Wire(Decoupled(bufT))
+        val deq  = Queue(enq, outBuf)
+        enq.valid     := validOutW(o)
+        enq.bits.idx  := arbIndex
+        enq.bits.data := dataOutW(o)
+        readyOutW(o)  := enq.ready
+        io.validOut(o) := deq.valid
+        io.dataOut(o)  := deq.bits.data
+        io.selOut(o)   := deq.bits.idx
+        deq.ready     := io.readyOut(o)
       } else {
         io.validOut(o) := validOutW(o)
         io.dataOut(o)  := dataOutW(o)
@@ -289,7 +291,7 @@ class VxStreamArb(
     val arbValid  = arb.io.grantValid
 
     val validOutW = Wire(Vec(numOutputs, Bool()))
-    val dataOutW  = Wire(Vec(numOutputs, UInt(dataw.W)))
+    val dataOutW  = Wire(Vec(numOutputs, gen.cloneType))
     val readyOutW = Wire(Vec(numOutputs, Bool()))
 
     for (o <- 0 until numOutputs) {
@@ -317,13 +319,14 @@ class VxStreamArb(
 
     for (o <- 0 until numOutputs) {
       if (outBuf > 0) {
-        val buf = Module(new VxElasticBuffer(dataw = dataw, size = outBuf))
-        buf.io.validIn  := validOutW(o)
-        buf.io.dataIn   := dataOutW(o)
-        readyOutW(o)    := buf.io.readyIn
-        io.validOut(o)  := buf.io.validOut
-        io.dataOut(o)   := buf.io.dataOut
-        buf.io.readyOut := io.readyOut(o)
+        val enq = Wire(Decoupled(gen.cloneType))
+        val deq = Queue(enq, outBuf)
+        enq.valid    := validOutW(o)
+        enq.bits     := dataOutW(o)
+        readyOutW(o) := enq.ready
+        io.validOut(o) := deq.valid
+        io.dataOut(o)  := deq.bits
+        deq.ready    := io.readyOut(o)
       } else {
         io.validOut(o) := validOutW(o)
         io.dataOut(o)  := dataOutW(o)
@@ -341,13 +344,14 @@ class VxStreamArb(
     // ----------------------------------------------------------------
     for (o <- 0 until numOutputs) {
       if (outBuf > 0) {
-        val buf = Module(new VxElasticBuffer(dataw = dataw, size = outBuf))
-        buf.io.validIn  := io.validIn(o)
-        buf.io.dataIn   := io.dataIn(o)
-        io.readyIn(o)   := buf.io.readyIn
-        io.validOut(o)  := buf.io.validOut
-        io.dataOut(o)   := buf.io.dataOut
-        buf.io.readyOut := io.readyOut(o)
+        val enq = Wire(Decoupled(gen.cloneType))
+        val deq = Queue(enq, outBuf)
+        enq.valid     := io.validIn(o)
+        enq.bits      := io.dataIn(o)
+        io.readyIn(o) := enq.ready
+        io.validOut(o) := deq.valid
+        io.dataOut(o)  := deq.bits
+        deq.ready     := io.readyOut(o)
       } else {
         io.validOut(o) := io.validIn(o)
         io.dataOut(o)  := io.dataIn(o)
@@ -562,9 +566,9 @@ class VxStreamXbar(
   } else if (numOutputs == 1) {
     // Multiple inputs arbitrated to single output
     val arb = Module(new VxStreamArb(
+      UInt(dataw.W),
       numInputs  = numInputs,
       numOutputs = 1,
-      dataw      = dataw,
       arbiter    = arbiter,
       outBuf     = outBuf
     ))
@@ -605,9 +609,9 @@ class VxStreamXbar(
     // One arbiter per output
     for (o <- 0 until numOutputs) {
       val arb = Module(new VxStreamArb(
+        UInt(dataw.W),
         numInputs  = numInputs,
         numOutputs = 1,
-        dataw      = dataw,
         arbiter    = arbiter,
         outBuf     = outBuf
       ))

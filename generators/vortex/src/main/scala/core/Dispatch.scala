@@ -59,48 +59,37 @@ class Dispatch(
   })
 
   // -------------------------------------------------------------------------
-  // Per-execution-unit 2-entry elastic buffers
+  // Per-execution-unit 2-entry elastic buffers — Queue(2, pipe=true) matches
+  // VX_elastic_buffer(SIZE=2, OUT_REG=1) from VX_dispatch.sv.
   // -------------------------------------------------------------------------
-  // Each buffer holds a DispatchBundle and accepts from operands_if when
-  // ex_type matches the buffer index.
-
-  val bufValid  = RegInit(VecInit(Seq.fill(NUM_EX_UNITS)(false.B)))
-  val bufData   = Reg(Vec(NUM_EX_UNITS, new DispatchBundle))
-
   val bufReadyIn = Wire(Vec(NUM_EX_UNITS, Bool()))
-
-  // Connect ready back to operands_if: ready when the matching buffer accepts
   io.op_ready := bufReadyIn(io.op_data.ex_type)
 
   for (i <- 0 until NUM_EX_UNITS) {
-    val exMatch = io.op_valid && (io.op_data.ex_type === i.U)
+    val enq = Wire(Decoupled(new DispatchBundle))
+    enq.valid          := io.op_valid && (io.op_data.ex_type === i.U)
+    enq.bits.uuid      := io.op_data.uuid
+    enq.bits.wis       := io.op_data.wis
+    enq.bits.sid       := io.op_data.sid
+    enq.bits.tmask     := io.op_data.tmask
+    enq.bits.PC        := io.op_data.PC
+    enq.bits.op_type   := io.op_data.op_type
+    enq.bits.op_args   := io.op_data.op_args
+    enq.bits.wb        := io.op_data.wb
+    enq.bits.rd        := io.op_data.rd
+    enq.bits.rs1_data  := io.op_data.rs1_data
+    enq.bits.rs2_data  := io.op_data.rs2_data
+    enq.bits.rs3_data  := io.op_data.rs3_data
+    enq.bits.sop       := io.op_data.sop
+    enq.bits.eop       := io.op_data.eop
 
-    // Buffer accepts when not full or downstream is consuming
-    bufReadyIn(i) := !bufValid(i) || io.dispatch_ready(i)
+    bufReadyIn(i) := enq.ready
 
-    when (exMatch && bufReadyIn(i)) {
-      bufValid(i) := true.B
-      // Copy operands fields into dispatch bundle
-      bufData(i).uuid     := io.op_data.uuid
-      bufData(i).wis      := io.op_data.wis
-      bufData(i).sid      := io.op_data.sid
-      bufData(i).tmask    := io.op_data.tmask
-      bufData(i).PC       := io.op_data.PC
-      bufData(i).op_type  := io.op_data.op_type
-      bufData(i).op_args  := io.op_data.op_args
-      bufData(i).wb       := io.op_data.wb
-      bufData(i).rd       := io.op_data.rd
-      bufData(i).rs1_data := io.op_data.rs1_data
-      bufData(i).rs2_data := io.op_data.rs2_data
-      bufData(i).rs3_data := io.op_data.rs3_data
-      bufData(i).sop      := io.op_data.sop
-      bufData(i).eop      := io.op_data.eop
-    }.elsewhen (io.dispatch_ready(i) && bufValid(i)) {
-      bufValid(i) := false.B
-    }
+    val deq = Queue(enq, entries = 2, pipe = true)
+    deq.ready := io.dispatch_ready(i)
 
-    io.dispatch_valid(i) := bufValid(i)
-    io.dispatch_data(i)  := bufData(i)
+    io.dispatch_valid(i) := deq.valid
+    io.dispatch_data(i)  := deq.bits
   }
 
   // -------------------------------------------------------------------------

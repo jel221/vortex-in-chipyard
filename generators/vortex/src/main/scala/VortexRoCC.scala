@@ -22,6 +22,9 @@ import freechips.rocketchip.diplomacy._
 import freechips.rocketchip.tilelink._
 import org.chipsalliance.cde.config._
 import org.chipsalliance.diplomacy.lazymodule._
+import org.chipsalliance.cde.config.Parameters
+import org.chipsalliance.diplomacy.ValName
+import org.chipsalliance.diplomacy.lazymodule._
 
 // ---------------------------------------------------------------------------
 // LazyRoCC wrapper
@@ -39,9 +42,14 @@ class VortexRoCC(opcodes: OpcodeSet)(implicit p: Parameters)
   // One TileLink client node per L3 memory port
   val memNodes = Seq.tabulate(VortexGPUPkg.L3_MEM_PORTS) { i =>
     TLClientNode(Seq(TLMasterPortParameters.v1(
-      clients = Seq(TLMasterParameters.v1(
+      clients = Seq(TLMasterParameters.v2(
         name     = s"vortex-mem-$i",
-        sourceId = IdRange(0, numSrcIds)
+        sourceId = IdRange(0, numSrcIds),
+        emits    = TLMasterToSlaveTransferSizes(
+          get        = TransferSizes(1, VortexConfigConstants.L3_LINE_SIZE),
+          putFull    = TransferSizes(1, VortexConfigConstants.L3_LINE_SIZE),
+          putPartial = TransferSizes(1, VortexConfigConstants.L3_LINE_SIZE)
+        )
       ))
     )))
   }
@@ -81,6 +89,9 @@ class VortexRoCCModule(outer: VortexRoCC)(implicit p: Parameters)
   val startup_addr = Reg(UInt(32.W))   // startup address (rs1) — wired directly
   val mpm_class    = RegInit(0.U(8.W)) // MPM class, not implemented yet
 
+  val srcFreeAll = Seq.fill(L3_MEM_PORTS)(RegInit(VecInit(Seq.fill(numSrcIds)(true.B))))
+  val allMemIdle = srcFreeAll.map(_.asUInt.andR).reduce(_ && _)
+
   // Both held stable for the entire execution
   gpu.io.startup_addr := startup_addr
   gpu.io.mpm_class    := mpm_class
@@ -104,15 +115,12 @@ class VortexRoCCModule(outer: VortexRoCC)(implicit p: Parameters)
         state := sBusy
     }
     is (sBusy) {
-      when (!gpu.io.busy) {
+      when (!gpu.io.busy && allMemIdle) {
         gpuReset := true.B
         state    := sIdle
       }
     }
   }
-
-  io.busy      := state =/= sIdle
-  io.interrupt := false.B // TODO: To fully implement, need the GPU to interrupt
 
   // No output
   io.resp.valid := false.B
@@ -129,12 +137,14 @@ class VortexRoCCModule(outer: VortexRoCC)(implicit p: Parameters)
   // -------------------------------------------------------------------------
   // MemBus → TileLink adapters (one per L3 memory port)
   // -------------------------------------------------------------------------
+  // Declare free-lists outside the loop so allMemIdle can see all ports.
+
   for (mp <- 0 until L3_MEM_PORTS) {
     val memBus     = gpu.io.mem_bus(mp)
     val (tl, edge) = outer.memNodes(mp).out(0)
 
     // Free-list: one bit per source ID, true = free
-    val srcFree  = RegInit(VecInit(Seq.fill(numSrcIds)(true.B)))
+    val srcFree  = srcFreeAll(mp)
     val allocOH  = PriorityEncoderOH(srcFree.asUInt)
     val allocId  = OHToUInt(allocOH)
     val canAlloc = srcFree.asUInt.orR
@@ -170,7 +180,7 @@ class VortexRoCCModule(outer: VortexRoCC)(implicit p: Parameters)
       uuidTable(allocId)   := memBus.req.bits.tag.uuid
     }
 
-    tl.d.ready                := memBus.rsp.ready && !gpuReset
+    tl.d.ready                := memBus.rsp.ready || gpuReset
     memBus.rsp.valid          := tl.d.valid
     memBus.rsp.bits.data      := tl.d.bits.data
     memBus.rsp.bits.tag.value := tagValTable(tl.d.bits.source)
@@ -188,4 +198,7 @@ class VortexRoCCModule(outer: VortexRoCC)(implicit p: Parameters)
     tl.e.valid := false.B
     tl.e.bits  := DontCare
   }
+
+  io.busy      := (state =/= sIdle)
+  io.interrupt := false.B // TODO: To fully implement, need the GPU to interrupt, faster simulation for now
 }

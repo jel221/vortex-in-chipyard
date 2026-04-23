@@ -100,8 +100,8 @@ class VxPeSwitch(
   // Response arbiter (PE_COUNT→1): VX_stream_arb
   // -------------------------------------------------------------------------
   val rspArb = Module(new VxStreamArb(
+    UInt(rspDataW.W),
     numInputs = peCount,
-    dataw     = rspDataW,
     arbiter   = arbiter,
     outBuf    = rspOutBuf
   ))

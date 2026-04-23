@@ -270,9 +270,9 @@ class AluMuldiv(val numLanes: Int = NUM_ALU_LANES) extends Module {
   private val arbDataW = tagW + numLanes * XLEN
 
   val rspArb = Module(new VxStreamArb(
+    UInt(arbDataW.W),
     numInputs  = 2,
     numOutputs = 1,
-    dataw      = arbDataW,
     arbiter    = "P",
     outBuf     = 2
   ))

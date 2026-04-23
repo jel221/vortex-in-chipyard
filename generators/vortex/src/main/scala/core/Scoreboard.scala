@@ -252,9 +252,9 @@ class VxScoreboard(val issueId: Int = 0) extends Module {
   }
 
   val outArb = Module(new VxStreamArb(
+    UInt(ibufW.W),
     numInputs  = PER_ISSUE_WARPS,
     numOutputs = 1,
-    dataw      = ibufW,
     arbiter    = "C",
     outBuf     = 3
   ))

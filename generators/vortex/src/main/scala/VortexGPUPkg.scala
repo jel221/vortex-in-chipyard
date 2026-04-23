@@ -614,7 +614,7 @@ class LsuArgsBundle extends Bundle {
   val padding  = UInt((INST_ARGS_BITS - 1 - 1 - OFFSET_BITS).W)   // unused upper bits
   val is_store = Bool()                  // is a store instruction
   val is_float = Bool()                  // is a floating-point load/store
-  val offset   = UInt(OFFSET_BITS.W)    // 12-bit signed offset
+  val offset   = SInt(OFFSET_BITS.W)    // 12-bit signed offset
 }
 
 // -----------------------------------------------------------------------------
@@ -763,6 +763,24 @@ class CommitBundle(simdWidth: Int = SIMD_WIDTH) extends Bundle {
   val data  = Vec(simdWidth, UInt(XLEN.W)) // result data (SIMD lanes)
   val sop   = Bool()                         // start-of-packet
   val eop   = Bool()                         // end-of-packet
+}
+
+// -----------------------------------------------------------------------------
+// lsu_res_t / alu_res_t / sfu_res_t — execution-unit result packet
+// numLanes: number of lanes for this unit (e.g. NUM_LSU_LANES)
+// Matches DECL_RESULT_T macro in VX_define.vh
+// -----------------------------------------------------------------------------
+class ExeResBundle(numLanes: Int) extends Bundle {
+  val uuid  = UInt(UUID_WIDTH.W)
+  val wid   = UInt(NW_WIDTH.W)
+  val tmask = UInt(numLanes.W)
+  val PC    = UInt(PC_BITS.W)
+  val wb    = Bool()
+  val rd    = UInt(NUM_REGS_BITS.W)
+  val data  = Vec(numLanes, UInt(XLEN.W))
+  val pid   = UInt(math.max(1, log2Ceil(math.max(2, NUM_THREADS / numLanes))).W)
+  val sop   = Bool()
+  val eop   = Bool()
 }
 
 // -----------------------------------------------------------------------------

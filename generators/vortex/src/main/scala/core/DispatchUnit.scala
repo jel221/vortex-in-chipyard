@@ -106,6 +106,26 @@ class DispatchUnit(
   // -------------------------------------------------------------------------
   // batch_idx selects which group of BLOCK_SIZE dispatch slots to service.
   // -------------------------------------------------------------------------
+  // Execute output bundle (one entry per block)
+  // -------------------------------------------------------------------------
+  class ExecBundle extends Bundle {
+    val uuid     = UInt(UUID_WIDTH.W)
+    val wid      = UInt(NW_WIDTH.W)
+    val tmask    = UInt(numLanes.W)
+    val PC       = UInt(PC_BITS.W)
+    val op_type  = UInt(INST_OP_BITS.W)
+    val op_args  = new OpArgsBundle
+    val wb       = Bool()
+    val rd       = UInt(NUM_REGS_BITS.W)
+    val rs1_data = Vec(numLanes, UInt(XLEN.W))
+    val rs2_data = Vec(numLanes, UInt(XLEN.W))
+    val rs3_data = Vec(numLanes, UInt(XLEN.W))
+    val pid      = UInt(GPID_WIDTH.W)
+    val sop      = Bool()
+    val eop      = Bool()
+  }
+
+  // -------------------------------------------------------------------------
   // Per-block wiring (declared before batchIdx so BATCH_COUNT>1 can reference)
   // -------------------------------------------------------------------------
   val blockReadyWire = Wire(Vec(blockSize, Bool()))
@@ -226,64 +246,48 @@ class DispatchUnit(
     val warpEop  = isEopP && dEop
 
     // -----------------------------------------------------------------------
-    // Output register (elastic buffer depth=2 or depth=outBuf)
+    // Output buffer — Queue matches VX_elastic_buffer(SIZE=outBuf, OUT_REG=...)
     // -----------------------------------------------------------------------
-    val outValid = RegInit(false.B)
-    val outUuid  = Reg(UInt(UUID_WIDTH.W))
-    val outWid   = Reg(UInt(NW_WIDTH.W))
-    val outTmask = Reg(UInt(numLanes.W))
-    val outPc    = Reg(UInt(PC_BITS.W))
-    val outOpt   = Reg(UInt(INST_OP_BITS.W))
-    val outArgs  = Reg(new OpArgsBundle)
-    val outWb    = Reg(Bool())
-    val outRd    = Reg(UInt(NUM_REGS_BITS.W))
-    val outRs1   = Reg(Vec(numLanes, UInt(XLEN.W)))
-    val outRs2   = Reg(Vec(numLanes, UInt(XLEN.W)))
-    val outRs3   = Reg(Vec(numLanes, UInt(XLEN.W)))
-    val outPid   = Reg(UInt(GPID_WIDTH.W))
-    val outSop   = Reg(Bool())
-    val outEop   = Reg(Bool())
+    val enq = Wire(Decoupled(new ExecBundle))
+    enq.valid          := validP
+    enq.bits.uuid      := dData.uuid
+    enq.bits.wid       := blockWid
+    enq.bits.tmask     := selTmask
+    enq.bits.PC        := dData.PC
+    enq.bits.op_type   := dData.op_type
+    enq.bits.op_args   := dData.op_args
+    enq.bits.wb        := dData.wb
+    enq.bits.rd        := dData.rd
+    enq.bits.rs1_data  := selRs1
+    enq.bits.rs2_data  := selRs2
+    enq.bits.rs3_data  := selRs3
+    enq.bits.pid       := warpPid
+    enq.bits.sop       := warpSop
+    enq.bits.eop       := warpEop
 
-    blockReadyWire(b) := !outValid || io.execute_ready(b)
+    blockReadyWire(b) := enq.ready
 
-    when (validP && blockReadyWire(b)) {
-      outValid := true.B
-      outUuid  := dData.uuid
-      outWid   := blockWid
-      outTmask := selTmask
-      outPc    := dData.PC
-      outOpt   := dData.op_type
-      outArgs  := dData.op_args
-      outWb    := dData.wb
-      outRd    := dData.rd
-      outRs1   := selRs1
-      outRs2   := selRs2
-      outRs3   := selRs3
-      outPid   := warpPid
-      outSop   := warpSop
-      outEop   := warpEop
-    }.elsewhen (io.execute_ready(b) && outValid) {
-      outValid := false.B
-    }
+    val deq = Queue(enq, entries = math.max(1, outBuf), pipe = true)
+    deq.ready := io.execute_ready(b)
 
-    io.execute_valid(b) := outValid
-    io.ex_uuid(b)       := outUuid
-    io.ex_wid(b)        := outWid
-    io.ex_tmask(b)      := outTmask
-    io.ex_PC(b)         := outPc
-    io.ex_op_type(b)    := outOpt
-    io.ex_op_args(b)    := outArgs
-    io.ex_wb(b)         := outWb
-    io.ex_rd(b)         := outRd
-    io.ex_rs1_data(b)   := outRs1
-    io.ex_rs2_data(b)   := outRs2
-    io.ex_rs3_data(b)   := outRs3
-    io.ex_pid(b)        := outPid
-    io.ex_sop(b)        := outSop
-    io.ex_eop(b)        := outEop
+    io.execute_valid(b) := deq.valid
+    io.ex_uuid(b)       := deq.bits.uuid
+    io.ex_wid(b)        := deq.bits.wid
+    io.ex_tmask(b)      := deq.bits.tmask
+    io.ex_PC(b)         := deq.bits.PC
+    io.ex_op_type(b)    := deq.bits.op_type
+    io.ex_op_args(b)    := deq.bits.op_args
+    io.ex_wb(b)         := deq.bits.wb
+    io.ex_rd(b)         := deq.bits.rd
+    io.ex_rs1_data(b)   := deq.bits.rs1_data
+    io.ex_rs2_data(b)   := deq.bits.rs2_data
+    io.ex_rs3_data(b)   := deq.bits.rs3_data
+    io.ex_pid(b)        := deq.bits.pid
+    io.ex_sop(b)        := deq.bits.sop
+    io.ex_eop(b)        := deq.bits.eop
 
     // Release the dispatch slot when all packets for this block have been sent
-    dispReadyOut(issueIdx) := blockReadyWire(b) && isEopP
+    dispReadyOut(issueIdx) := enq.ready && isEopP
   }
 
   io.dispatch_ready := dispReadyOut

@@ -59,7 +59,8 @@ __attribute__((noinline, section(".text.kernel")))
 static void kernel_entry(uint32_t *buf)
 {
     result_buf[0] = KERNEL_SENTINEL;
-    asm volatile ("fence" ::: "memory");
+    result_buf[1] = KERNEL_SENTINEL;
+    //asm volatile ("fence" ::: "memory");
     vx_tmc(0);
 }
 
@@ -71,7 +72,10 @@ static void kernel_entry(uint32_t *buf)
 // Rocket stalls here (io.busy) until the GPU signals completion.
 static inline void vortex_launch(uintptr_t startup_addr, uintptr_t startup_arg)
 {
-    // Ensure all preceding stores are visible before the GPU starts.
+    // Flush result_buf from CPU L1 so the GPU sees the initialized values in DRAM.
+    // CFLUSH.D.L1: I-type, opcode=0x73 (SYSTEM), funct3=0, rd=x0, funct12=0x102
+    //asm volatile (".insn i 0x73, 0, x0, %0, 0x102" :: "r"(startup_arg) : "memory");
+    asm volatile (".insn i 0x73, 0, x0, %0, -64" :: "r"(startup_arg) : "memory");
     asm volatile ("fence" ::: "memory");
     printf("kernel pointer: %p \n", startup_addr);
     printf("argument pointer: %p \n", startup_arg);
@@ -95,8 +99,8 @@ int main(void)
     // GPU has finished (Rocket was stalled until busy de-asserted).
     // Verify the sentinel.
     if (result_buf[0] != KERNEL_SENTINEL) {
-        printf("not good \n");
-        return 1;  // FAIL
+      printf("result_buf[0] %p \n", result_buf[0]);
+      return 1;  // FAIL
     }
 
     return 0;  // PASS
