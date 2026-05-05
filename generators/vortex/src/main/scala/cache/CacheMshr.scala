@@ -59,9 +59,6 @@ class MshrDataBundle(
  *   valid_table value (not from each other's output). This matches the SV
  *   behaviour exactly.
  *
- *   allocate_id_n / dequeue_id_n are computed combinationally but then
- *   REGISTERED unconditionally every clock cycle (they are flip-flop
- *   outputs in the SV: `dequeue_id_r <= dequeue_id_n` with no enable).
  */
 class CacheMshr(
   mshrSize:      Int,
@@ -107,40 +104,39 @@ class CacheMshr(
     val finalize_id         = Input(UInt(mshrAddrWidth.W))
   })
 
-  // ---- state tables --------------------------------------------------------
-  val addr_table  = Reg(Vec(mshrSize, UInt(lineAddrWidth.W)))
-  val next_index  = Reg(Vec(mshrSize, UInt(mshrAddrWidth.W)))
-  val valid_table = RegInit(0.U(mshrSize.W))
-  val next_table  = RegInit(0.U(mshrSize.W))
-  val write_table = RegInit(0.U(mshrSize.W))
+  // ---- next-value wires (declared before registers so RegNext can reference them)
+  val valid_table_n = Wire(UInt(mshrSize.W))
+  val next_table_x  = Wire(UInt(mshrSize.W))
+  val next_table_n  = Wire(UInt(mshrSize.W))
+  val dequeue_val_n = Wire(Bool())
+  val dequeue_id_n  = Wire(UInt(mshrAddrWidth.W))
 
-  val allocate_rdy   = RegInit(false.B)
-  val allocate_id_r  = RegInit(0.U(mshrAddrWidth.W))
-  val dequeue_val    = RegInit(false.B)
-  val dequeue_id_r   = RegInit(0.U(mshrAddrWidth.W))
+  val allocate_id_n  = PriorityEncoder(~valid_table_n)
+  val allocate_rdy_n = (~valid_table_n).orR
+
+  // ---- state registers
+  val addr_table    = Reg(Vec(mshrSize, UInt(lineAddrWidth.W)))
+  val next_index    = Reg(Vec(mshrSize, UInt(mshrAddrWidth.W)))
+  val valid_table   = RegNext(valid_table_n,  0.U(mshrSize.W))
+  val next_table    = RegNext(next_table_n,   0.U(mshrSize.W))
+  val write_table   = RegInit(0.U(mshrSize.W))
+  val allocate_rdy  = RegNext(allocate_rdy_n, false.B)
+  val allocate_id_r = RegNext(allocate_id_n,  0.U(mshrAddrWidth.W))
+  val dequeue_val   = RegNext(dequeue_val_n,  false.B)
+  val dequeue_id_r  = RegNext(dequeue_id_n,   0.U(mshrAddrWidth.W))
+
+  // ---- defaults: next = current (hold state)
+  valid_table_n := valid_table
+  next_table_x  := next_table
+  next_table_n  := next_table_x
+  dequeue_val_n := dequeue_val
+  dequeue_id_n  := dequeue_id_r
 
   // ---- address-match vector ------------------------------------------------
-  // addr_matches[i] = valid_table[i] && (addr_table[i] == allocate_addr)
   val addr_matches = VecInit((0 until mshrSize).map { i =>
     valid_table(i) && (addr_table(i) === io.allocate_addr)
   }).asUInt
 
-  // ---- combinational next-state logic (mirrors SV always@(*)) -------------
-  // All *_n signals START from the current register values (not from each
-  // other within this combinational block — matches the SV semantics).
-  val valid_table_n = WireDefault(UInt(mshrSize.W), valid_table)
-  val next_table_x  = WireDefault(UInt(mshrSize.W), next_table)
-  val dequeue_val_n = WireDefault(Bool(), dequeue_val) 
-  val dequeue_id_n  = WireDefault(UInt(mshrAddrWidth.W), dequeue_id_r)
-
-  // Priority encoder: first free slot → next allocate id
-  // SV: VX_priority_encoder on (~valid_table_n)
-  // Note: SV uses valid_table_n (which may include in-flight dequeue) — but
-  // valid_table_n starts equal to valid_table at this point, so this is correct.
-  val allocate_id_n  = PriorityEncoder(~valid_table_n)
-  val allocate_rdy_n = (~valid_table_n).orR
-
-  // Priority encoder: find tail entry for same address (addr_matches & ~next_table_x)
   val tail_candidates = addr_matches & ~next_table_x
   val prev_idx        = PriorityEncoder(tail_candidates)
 
@@ -172,47 +168,21 @@ class CacheMshr(
     when (io.finalize_is_release) {
       valid_table_n := valid_table & ~UIntToOH(io.finalize_id, mshrSize)
     }
-    // Warning comment from SV preserved: next_table_x is set unconditionally
-    // for finalize_is_pending to reduce timing; wrong updates are cleared by
-    // allocate_fire below.
+    // next_table_x is set unconditionally for finalize_is_pending to reduce
+    // timing; wrong updates are cleared by allocate_fire below.
     when (io.finalize_is_pending) {
       next_table_x := next_table | UIntToOH(io.finalize_previd, mshrSize)
     }
   }
 
-  // 4) allocate_fire → update next_table_n from next_table_x
-  val next_table_n = WireDefault(next_table_x)
+  // 4) allocate_fire → override next_table_n and valid_table_n
   when (allocate_fire) {
     valid_table_n := valid_table | UIntToOH(allocate_id_r, mshrSize)
     next_table_n  := next_table_x & ~UIntToOH(allocate_id_r, mshrSize)
   }
 
-  // ---- sequential update ---------------------------------------------------
-  // SV always @(posedge clk):
-  //   if (reset) { valid_table<=0; allocate_rdy<=0; dequeue_val<=0; }
-  //   else       { valid_table<=valid_table_n; allocate_rdy<=allocate_rdy_n; dequeue_val<=dequeue_val_n; }
-  //
-  //   if (allocate_fire) { addr_table[allocate_id] <= allocate_addr; write_table[allocate_id] <= allocate_rw; }
-  //
-  //   if (finalize_valid && finalize_is_pending) { next_index[finalize_previd] <= finalize_id; }
-  //
-  //   dequeue_id_r  <= dequeue_id_n;    // unconditional!
-  //   allocate_id_r <= allocate_id_n;   // unconditional!
-  //   next_table    <= next_table_n;    // unconditional!
-
-  when (reset.asBool) {
-    valid_table  := 0.U
-    allocate_rdy := false.B
-    dequeue_val  := false.B
-  } .otherwise {
-    valid_table  := valid_table_n
-    allocate_rdy := allocate_rdy_n
-    dequeue_val  := dequeue_val_n
-  }
-
   when (allocate_fire) {
     addr_table(allocate_id_r) := io.allocate_addr
-    // write_table is a bitmask: set or clear the bit for allocate_id_r
     write_table := Mux(io.allocate_rw,
                        write_table | UIntToOH(allocate_id_r, mshrSize),
                        write_table & ~UIntToOH(allocate_id_r, mshrSize))
@@ -221,11 +191,6 @@ class CacheMshr(
   when (io.finalize_valid && io.finalize_is_pending) {
     next_index(io.finalize_previd) := io.finalize_id
   }
-
-  // These three are unconditional register updates (no enable, no reset)
-  dequeue_id_r  := dequeue_id_n
-  allocate_id_r := allocate_id_n
-  next_table    := next_table_n
 
   // ---- MSHR data RAM -------------------------------------------------------
   // VX_dp_ram with RDW_MODE="R", RADDR_REG=1:

@@ -181,7 +181,7 @@ class VortexRoCCModule(outer: VortexRoCC)(implicit p: Parameters)
     }
 
     tl.d.ready                := memBus.rsp.ready || gpuReset
-    memBus.rsp.valid          := tl.d.valid
+    memBus.rsp.valid          := tl.d.valid && (tl.d.bits.opcode === TLMessages.AccessAckData)
     memBus.rsp.bits.data      := tl.d.bits.data
     memBus.rsp.bits.tag.value := tagValTable(tl.d.bits.source)
     memBus.rsp.bits.tag.uuid  := uuidTable(tl.d.bits.source)
@@ -199,6 +199,6 @@ class VortexRoCCModule(outer: VortexRoCC)(implicit p: Parameters)
     tl.e.bits  := DontCare
   }
 
-  io.busy      := (state =/= sIdle)
+  io.busy      := (state =/= sIdle) || io.cmd.valid
   io.interrupt := false.B // TODO: To fully implement, need the GPU to interrupt, faster simulation for now
 }

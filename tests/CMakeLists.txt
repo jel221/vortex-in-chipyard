@@ -88,6 +88,7 @@ add_executable(symmetric symmetric.c)
 add_executable(ctc-test ctc-test.c)
 add_executable(multi-ctc-test multi-ctc-test.c)
 add_executable(vortex-test vortex-test.c)
+add_executable(vortex-vadd vortex-vadd.c)
 
 #################################
 # Disassembly

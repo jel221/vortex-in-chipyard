@@ -18,7 +18,9 @@ import chisel3.util._
 
 // Pending size tracker: tracks the number of in-flight items,
 // with full/empty/alm_full/alm_empty status flags.
-// incr and decr are 1-bit by default (single-step mode).
+// Mirrors VX_pending_size.sv:
+//   incrw==1 && decrw==1 → g_single_step (flag-based, no explicit counter)
+//   otherwise            → g_wide_step   (signed-arithmetic counter)
 class VxPendingSize(
   val size     : Int = 1,
   val incrw    : Int = 1,
@@ -26,7 +28,7 @@ class VxPendingSize(
   val almFull  : Int = -1,  // default: size-1
   val almEmpty : Int = 1
 ) extends Module {
-  val af   = if (almFull  == -1) size - 1 else almFull
+  val af    = if (almFull == -1) size - 1 else almFull
   val sizew = log2Ceil(size + 1)
 
   val io = IO(new Bundle {
@@ -40,6 +42,7 @@ class VxPendingSize(
   })
 
   if (size == 1) {
+    // g_size_eq1
     val sizeR = RegInit(false.B)
     when(io.incr.asBool && !io.decr.asBool) {
       sizeR := true.B
@@ -51,45 +54,72 @@ class VxPendingSize(
     io.almEmpty := true.B
     io.almFull  := true.B
     io.size     := sizeR.asUInt
-  } else {
-    val addrw  = log2Up(size)
-    val usedR  = RegInit(0.U(addrw.W))
-    val emptyR = RegInit(true.B)
-    val fullR  = RegInit(false.B)
+
+  } else if (incrw != 1 || decrw != 1) {
+    // g_wide_step: signed delta = incr - decr; size_n = size_r + delta.
+    // Mirrors SV: registers full/empty/alm_ from size_n each cycle.
+    val sizeR     = RegInit(0.U(sizew.W))
+    val emptyR    = RegInit(true.B)
+    val fullR     = RegInit(false.B)
     val almEmptyR = RegInit(true.B)
     val almFullR  = RegInit(false.B)
 
-    val incrB = io.incr.orR
-    val decrB = io.decr.orR
+    val delta  = io.incr.zext - io.decr.zext          // SInt subtraction
+    val sizeN  = sizeR.zext + delta                    // SInt addition
 
-    val isAlmEmpty   = usedR === almEmpty.U
-    val isAlmEmptyN  = usedR === (almEmpty + 1).U
-    val isAlmFull    = usedR === af.U
-    val isAlmFullN   = usedR === (af - 1).U
-    val isEmptyN     = usedR === 1.U
-    val isFullN      = usedR === (size - 1).U
+    assert(sizeN >= 0.S,      "VxPendingSize: counter underflow")
+    assert(sizeN <= size.S,   "VxPendingSize: counter overflow")
+
+    sizeR     := sizeN.asUInt
+    emptyR    := (sizeN === 0.S)
+    fullR     := (sizeN === size.S)
+    almEmptyR := (sizeN <= almEmpty.S)
+    almFullR  := (sizeN >= af.S)
+
+    io.empty    := emptyR
+    io.full     := fullR
+    io.almEmpty := almEmptyR
+    io.almFull  := almFullR
+    io.size     := sizeR
+
+  } else {
+    // g_single_step: incrw==1, decrw==1 — flag-based, no wide counter needed.
+    val addrw     = log2Up(size)
+    val usedR     = RegInit(0.U(addrw.W))
+    val emptyR    = RegInit(true.B)
+    val fullR     = RegInit(false.B)
+    val almEmptyR = RegInit(true.B)
+    val almFullR  = RegInit(false.B)
+
+    val incrB = io.incr.asBool
+    val decrB = io.decr.asBool
+
+    val isAlmEmpty  = usedR === almEmpty.U
+    val isAlmEmptyN = usedR === (almEmpty + 1).U
+    val isAlmFull   = usedR === af.U
+    val isAlmFullN  = usedR === (af - 1).U
+    val isEmptyN    = usedR === 1.U
+    val isFullN     = usedR === (size - 1).U
 
     when(incrB && !decrB) {
       emptyR := false.B
-      when(isFullN) { fullR := true.B }
+      when(isFullN)    { fullR    := true.B  }
       when(isAlmEmpty) { almEmptyR := false.B }
-      when(isAlmFullN) { almFullR  := true.B }
+      when(isAlmFullN) { almFullR  := true.B  }
       usedR := usedR + 1.U
     }.elsewhen(!incrB && decrB) {
       fullR := false.B
-      when(isEmptyN) { emptyR := true.B }
-      when(isAlmFull) { almFullR  := false.B }
-      when(isAlmEmptyN) { almEmptyR := true.B }
+      when(isEmptyN)    { emptyR   := true.B  }
+      when(isAlmFull)   { almFullR  := false.B }
+      when(isAlmEmptyN) { almEmptyR := true.B  }
       usedR := usedR - 1.U
     }
-    // incr && decr: size stays the same, but alm_ flags may need update (not modeled for simplicity)
 
     io.empty    := emptyR
     io.full     := fullR
     io.almEmpty := almEmptyR
     io.almFull  := almFullR
 
-    // size output: if size is a power of 2, SIZEW == ADDRW, else full_r appended
     if (sizew > addrw) {
       io.size := Cat(fullR, usedR)
     } else {

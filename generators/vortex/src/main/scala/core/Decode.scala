@@ -36,7 +36,6 @@ class VxDecode extends Module {
   // -------------------------------------------------------------------------
   // Derived widths
   // -------------------------------------------------------------------------
-  private val outDataW = (new DecodeBundle).getWidth
 
   val io = IO(new Bundle {
     // Fetch interface (slave)
@@ -643,11 +642,8 @@ class VxDecode extends Module {
   val used_rs = Cat(use_rs3, use_rs2, use_rs1)
 
   // -------------------------------------------------------------------------
-  // Output elastic buffer (SIZE=0 → pass-through, matching SV instantiation)
+  // Output (pass-through DecoupledIO — SIZE=0 in SV original)
   // -------------------------------------------------------------------------
-  val buf = Module(new VXElasticBuffer(dataw = outDataW, size = 0))
-
-  // Pack fetch passthrough data and decoded fields into a single bus
   val dataIn = Wire(new DecodeBundle)
   dataIn.uuid    := io.fetch_uuid
   dataIn.wid     := io.fetch_wid
@@ -663,13 +659,14 @@ class VxDecode extends Module {
   dataIn.rs2     := rs2_v
   dataIn.rs3     := rs3_v
 
-  buf.io.valid_in := io.fetch_valid
-  io.fetch_ready  := buf.io.ready_in
-  buf.io.data_in  := dataIn.asUInt
-  buf.io.ready_out := io.decode_ready
+  val out        = Wire(Decoupled(new DecodeBundle))
+  out.valid      := io.fetch_valid
+  out.bits       := dataIn
+  out.ready      := io.decode_ready
+  io.fetch_ready := out.ready
+  io.decode_valid := out.valid
 
-  val dataOut = buf.io.data_out.asTypeOf(new DecodeBundle)
-  io.decode_valid   := buf.io.valid_out
+  val dataOut    = out.bits
   io.decode_uuid    := dataOut.uuid
   io.decode_wid     := dataOut.wid
   io.decode_tmask   := dataOut.tmask

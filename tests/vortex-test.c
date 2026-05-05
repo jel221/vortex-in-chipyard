@@ -76,10 +76,10 @@ static inline void vortex_launch(uintptr_t startup_addr, uintptr_t startup_arg)
     // CFLUSH.D.L1: I-type, opcode=0x73 (SYSTEM), funct3=0, rd=x0, funct12=0x102
     //asm volatile (".insn i 0x73, 0, x0, %0, 0x102" :: "r"(startup_arg) : "memory");
     asm volatile (".insn i 0x73, 0, x0, %0, -64" :: "r"(startup_arg) : "memory");
-    asm volatile ("fence" ::: "memory");
     printf("kernel pointer: %p \n", startup_addr);
     printf("argument pointer: %p \n", startup_arg);
     ROCC_INSTRUCTION_SS(0, startup_addr, startup_arg, 0);
+    asm volatile ("fence" ::: "memory");
     // Rocket re-checks busy before retiring the next instruction, so no
     // explicit fence is needed after the RoCC instruction itself.
 }

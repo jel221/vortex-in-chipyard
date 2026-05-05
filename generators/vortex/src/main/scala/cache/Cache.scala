@@ -48,6 +48,11 @@ class CacheMemReqBufBundle(
   val flags  = UInt(flagsW.W)
 }
 
+class CacheRspBundle(val dataW: Int, val tagW: Int) extends Bundle {
+  val data = UInt(dataW.W)
+  val tag  = UInt(tagW.W)
+}
+
 /**
  * Cache – top-level multi-bank cache (without bypass/NC logic).
  *
@@ -260,43 +265,26 @@ class Cache(
   //    in-flight requests for the flush sequencer's BANK_SEL_LATENCY counter.)
   // =========================================================================
 
-  // Simple round-robin crossbar: for each bank, pick one request targeting it.
-  val xbar_rr = RegInit(VecInit.fill(numBanks)(0.U(math.max(1, log2Ceil(numReqs)).W)))
+  val coreReqXbar = Module(new VxStreamXbar(
+    numInputs  = numReqs,
+    numOutputs = numBanks,
+    dataw      = coreReqDataW,
+    arbiter    = "R",
+    outBuf     = reqXbarBuf
+  ))
+
+  for (i <- 0 until numReqs) {
+    coreReqXbar.io.validIn(i) := core_req_valid(i)
+    coreReqXbar.io.dataIn(i)  := core_req_data_in(i)
+    coreReqXbar.io.selIn(i)   := core_req_bid(i)
+    core_req_ready(i)         := coreReqXbar.io.readyIn(i)
+  }
 
   for (b <- 0 until numBanks) {
-    val base = xbar_rr(b)
-
-    // Find candidates (This creates a Scala Seq[Bool])
-    val cands_valid_seq = (0 until numReqs).map { i => core_req_valid(i) && (core_req_bid(i) === b.U) }
-    
-    // Convert to a hardware Vec[Bool] so it can be indexed dynamically
-    val cands_valid_vec = VecInit(cands_valid_seq)
-
-    // Build rotated priority starting from rr pointer
-    val rotated_valid = Wire(Vec(numReqs, Bool()))
-    for (i <- 0 until numReqs) {
-      // Now it is perfectly legal to index with your UInt math!
-      rotated_valid(i) := cands_valid_vec((base + i.U) % numReqs.U)
-    }
-    val winner_rot = PriorityEncoder(rotated_valid.asUInt)
-    val winner_abs = ((base + winner_rot) % numReqs.U).asUInt
-    val winner_val = rotated_valid.asUInt.orR
-
-    pb_core_req_valid(b) := winner_val
-    pb_core_req_data(b)  := Mux(winner_val, core_req_data_in(winner_abs), 0.U)
-    pb_core_req_idx(b)   := winner_abs
-
-    // Advance RR pointer when a request fires
-    when (winner_val && pb_core_req_ready(b)) {
-      xbar_rr(b) := ((winner_abs + 1.U) % numReqs.U).asUInt
-    }
-
-    // Back-pressure to original requester
-    for (r <- 0 until numReqs) {
-      when (winner_abs === r.U && winner_val) {
-        core_req_ready(r) := pb_core_req_ready(b)
-      }
-    }
+    pb_core_req_valid(b)         := coreReqXbar.io.validOut(b)
+    pb_core_req_data(b)          := coreReqXbar.io.dataOut(b)
+    pb_core_req_idx(b)           := coreReqXbar.io.selOut(b)
+    coreReqXbar.io.readyOut(b)   := pb_core_req_ready(b)
   }
 
   // Unpack bank request data
@@ -390,63 +378,40 @@ class Cache(
   // SV: CORE_RSP_DATAW = WORD_WIDTH + TAG_WIDTH
   private val coreRspDataW = wordWidth + tagWidth
 
-  val rsp_rr = RegInit(VecInit.fill(numReqs)(0.U(math.max(1, log2Ceil(numBanks)).W)))
+  // Pack {data, tag} per bank — matches SV: core_rsp_data_in[i] = {data[i], tag[i]}
+  val coreRspXbarIn = VecInit((0 until numBanks).map(b => Cat(pb_core_rsp_data(b), pb_core_rsp_tag(b))))
 
-for (r <- 0 until numReqs) {
-    val base = rsp_rr(r)
+  val coreRspXbar = Module(new VxStreamXbar(
+    numInputs  = numBanks,
+    numOutputs = numReqs,
+    dataw      = coreRspDataW,
+    arbiter    = "R",
+    outBuf     = 0
+  ))
 
-    // 1. Find banks that have a response for requester r (Scala Seq[Bool])
-    val cands_seq = (0 until numBanks).map { b =>
-      pb_core_rsp_valid(b) && (pb_core_rsp_idx(b) === r.U)
-    }
-    
-    // 2. Convert to Hardware Vec
-    val cands_vec = VecInit(cands_seq)
+  for (b <- 0 until numBanks) {
+    coreRspXbar.io.validIn(b) := pb_core_rsp_valid(b)
+    coreRspXbar.io.dataIn(b)  := coreRspXbarIn(b)
+    coreRspXbar.io.selIn(b)   := pb_core_rsp_idx(b)
+    pb_core_rsp_ready(b)      := coreRspXbar.io.readyIn(b)
+  }
 
-    // 3. Round-robin selection using UInt index
-    val rotated = Wire(Vec(numBanks, Bool()))
-    for (i <- 0 until numBanks) {
-      // Safely indexed by hardware UInt math!
-      rotated(i) := cands_vec((base + i.U) % numBanks.U)
-    }
-    val winner_rot = PriorityEncoder(rotated.asUInt)
-    val winner_b   = ((base + winner_rot) % numBanks.U).asUInt
-    val winner_val = rotated.asUInt.orR
+  private val coreRspBufSize = if (coreRspBufEnable) math.max(1, coreOutBuf) else 0
 
-    // Elastic buffer (VX_elastic_buffer): buffered output for core response
-    val bufSize = if (coreRspBufEnable) {
-      // TO_OUT_BUF_SIZE(CORE_OUT_BUF): 0→0, 1→1, 2→2, 3→3
-      math.max(1, coreOutBuf)
-    } else {
-      0  // no buffering when only 1 bank and 1 req
-    }
-    val rsp_buf = Module(new Queue(new Bundle {
-      val data = UInt(wordWidth.W)
-      val tag  = UInt(tagWidth.W)
-    }, if (bufSize > 0) bufSize else 1,
-       pipe = (bufSize <= 1), flow = false))
+  for (r <- 0 until numReqs) {
+    val enq = Wire(Decoupled(new CacheRspBundle(wordWidth, tagWidth)))
+    enq.valid     := coreRspXbar.io.validOut(r)
+    enq.bits.data := coreRspXbar.io.dataOut(r)(coreRspDataW - 1, tagWidth)
+    enq.bits.tag  := coreRspXbar.io.dataOut(r)(tagWidth - 1, 0)
+    coreRspXbar.io.readyOut(r) := enq.ready
 
-    rsp_buf.io.enq.valid    := winner_val
-    rsp_buf.io.enq.bits.data := pb_core_rsp_data(winner_b)
-    rsp_buf.io.enq.bits.tag  := pb_core_rsp_tag(winner_b)
+    val deq = Queue(enq, entries = math.max(1, coreRspBufSize), pipe = true)
 
-    // Connect to cacheInit core_bus_out response
-    cacheInit.io.core_bus_out(r).rsp.valid := rsp_buf.io.deq.valid
-    cacheInit.io.core_bus_out(r).rsp.bits.data := rsp_buf.io.deq.bits.data
-    cacheInit.io.core_bus_out(r).rsp.bits.tag  := rsp_buf.io.deq.bits.tag
-                                                   .asTypeOf(cacheInit.io.core_bus_out(r).rsp.bits.tag)
-    rsp_buf.io.deq.ready := cacheInit.io.core_bus_out(r).rsp.ready
-
-    // Back-pressure to winning bank
-    for (b <- 0 until numBanks) {
-      when (winner_b === b.U && winner_val) {
-        pb_core_rsp_ready(b) := rsp_buf.io.enq.ready
-      }
-    }
-
-    when (winner_val && rsp_buf.io.enq.ready) {
-      rsp_rr(r) := ((winner_b + 1.U) % numBanks.U).asUInt
-    }
+    cacheInit.io.core_bus_out(r).rsp.valid      := deq.valid
+    cacheInit.io.core_bus_out(r).rsp.bits.data  := deq.bits.data
+    cacheInit.io.core_bus_out(r).rsp.bits.tag   := deq.bits.tag
+                                                    .asTypeOf(cacheInit.io.core_bus_out(r).rsp.bits.tag)
+    deq.ready := cacheInit.io.core_bus_out(r).rsp.ready
   }
 
   // =========================================================================
@@ -516,30 +481,32 @@ for (r <- 0 until numReqs) {
       mem_req_tag_w  := arbOut.tag(memTagWidth - 1, 0)
     }
 
-    val mem_req_buf = Wire(Decoupled(
+    val memReqBufSize = if (memReqBufEnable) math.max(1, memOutBuf) else 0
+
+    val mem_req_enq = Wire(Decoupled(
       new CacheMemReqBufBundle(lineSize, memAddrWidthCS, lineWidth, memTagWidth, math.max(1, flagsWidth))
     ))
+    mem_req_enq.valid       := memReqArb.io.validOut(pi)
+    mem_req_enq.bits.rw     := arbOut.rw
+    mem_req_enq.bits.byteen := arbOut.byteen
+    mem_req_enq.bits.addr   := mem_req_addr_w
+    mem_req_enq.bits.data   := arbOut.data
+    mem_req_enq.bits.tag    := mem_req_tag_w
+    mem_req_enq.bits.flags  := arbOut.flags
+    memReqArb.io.readyOut(pi) := mem_req_enq.ready
 
-    mem_req_buf.valid       := memReqArb.io.validOut(pi)
-    mem_req_buf.bits.rw     := arbOut.rw
-    mem_req_buf.bits.byteen := arbOut.byteen
-    mem_req_buf.bits.addr   := mem_req_addr_w
-    mem_req_buf.bits.data   := arbOut.data
-    mem_req_buf.bits.tag    := mem_req_tag_w
-    mem_req_buf.bits.flags  := arbOut.flags
-    mem_req_buf.ready       := io.mem_bus(pi).req.ready
+    val mem_req_deq = Queue(mem_req_enq, entries = math.max(1, memReqBufSize), pipe = true)
 
-    memReqArb.io.readyOut(pi)       := mem_req_buf.ready
-
-    io.mem_bus(pi).req.valid        := mem_req_buf.valid
-    io.mem_bus(pi).req.bits.rw      := mem_req_buf.bits.rw
-    io.mem_bus(pi).req.bits.byteen  := mem_req_buf.bits.byteen
-    io.mem_bus(pi).req.bits.addr    := mem_req_buf.bits.addr
-    io.mem_bus(pi).req.bits.data    := mem_req_buf.bits.data
-    io.mem_bus(pi).req.bits.tag     := mem_req_buf.bits.tag
+    io.mem_bus(pi).req.valid        := mem_req_deq.valid
+    io.mem_bus(pi).req.bits.rw      := mem_req_deq.bits.rw
+    io.mem_bus(pi).req.bits.byteen  := mem_req_deq.bits.byteen
+    io.mem_bus(pi).req.bits.addr    := mem_req_deq.bits.addr
+    io.mem_bus(pi).req.bits.data    := mem_req_deq.bits.data
+    io.mem_bus(pi).req.bits.tag     := mem_req_deq.bits.tag
                                        .asTypeOf(io.mem_bus(pi).req.bits.tag)
-    io.mem_bus(pi).req.bits.flags   := mem_req_buf.bits.flags
+    io.mem_bus(pi).req.bits.flags   := mem_req_deq.bits.flags
                                        .asTypeOf(io.mem_bus(pi).req.bits.flags)
+    mem_req_deq.ready := io.mem_bus(pi).req.ready
   }
 
   // =========================================================================
@@ -565,23 +532,22 @@ for (r <- 0 until numReqs) {
   // First, the responses go through an elastic buffer (mem_rsp_queue).
   // =========================================================================
 
-  // Per-port memory response elastic buffer (MRSQ_SIZE)
+  // Per-port memory response elastic buffer (mem_rsp_queue, MRSQ_SIZE)
   val mem_rsp_q_valid = Wire(Vec(memPorts, Bool()))
-  val mem_rsp_q_data  = Wire(Vec(memPorts, UInt((lineWidth + memTagWidth).W)))
+  val mem_rsp_q_data  = Wire(Vec(memPorts, new CacheRspBundle(lineWidth, memTagWidth)))
   val mem_rsp_q_ready = WireDefault(VecInit.fill(memPorts)(false.B))
 
   for (pi <- 0 until memPorts) {
-    val bufSize = if (mrsqSize > 2) mrsqSize else mrsqSize  // always buffer
-    val rsp_q = Module(new Queue(UInt((lineWidth + memTagWidth).W), bufSize,
-                                  pipe = false, flow = false))
-    val packed = Cat(io.mem_bus(pi).rsp.bits.data,
-                     io.mem_bus(pi).rsp.bits.tag.asUInt)
-    rsp_q.io.enq.valid  := io.mem_bus(pi).rsp.valid
-    rsp_q.io.enq.bits   := packed
-    io.mem_bus(pi).rsp.ready := rsp_q.io.enq.ready
-    mem_rsp_q_valid(pi) := rsp_q.io.deq.valid
-    mem_rsp_q_data(pi)  := rsp_q.io.deq.bits
-    rsp_q.io.deq.ready  := mem_rsp_q_ready(pi)
+    val enq = Wire(Decoupled(new CacheRspBundle(lineWidth, memTagWidth)))
+    enq.valid      := io.mem_bus(pi).rsp.valid
+    enq.bits.data  := io.mem_bus(pi).rsp.bits.data
+    enq.bits.tag   := io.mem_bus(pi).rsp.bits.tag.asUInt
+    io.mem_bus(pi).rsp.ready := enq.ready
+
+    val deq = Queue(enq, mrsqSize)
+    mem_rsp_q_valid(pi) := deq.valid
+    mem_rsp_q_data(pi)  := deq.bits
+    deq.ready           := mem_rsp_q_ready(pi)
   }
 
   // Route responses to banks
@@ -589,7 +555,7 @@ for (r <- 0 until numReqs) {
     // Find which port (if any) has a response for bank b
     val src_valid = Wire(Vec(memPorts, Bool()))
     for (pi <- 0 until memPorts) {
-      val tag_bits = mem_rsp_q_data(pi)(memTagWidth - 1, 0)
+      val tag_bits = mem_rsp_q_data(pi).tag
       val bank_id = Wire(UInt(bankSelWidth.W))
       if (numBanks > 1) {
         if (numBanks != memPorts) {
@@ -614,11 +580,11 @@ for (r <- 0 until numReqs) {
     // SV: {per_bank_mem_rsp_data[i], per_bank_mem_rsp_tag[i]} = per_bank_mem_rsp_pdata[i]
     //     where per_bank_mem_rsp_pdata stripes off the arb-sel bits from the tag.
     // tag after stripping arb bits = bank_mem_tag
-    val raw_tag     = rsp_packed(memTagWidth - 1, 0)
+    val raw_tag     = rsp_packed.tag
     // SV: mem_rsp_tag_s = raw_tag[MEM_TAG_WIDTH-1:MEM_ARB_SEL_BITS]  = BANK_MEM_TAG_WIDTH bits
     val bank_tag    = if (memArbSelBits > 0) raw_tag(memTagWidth - 1, memArbSelBits)
                       else raw_tag(bankMemTagWidth - 1, 0)
-    val rsp_data    = rsp_packed(lineWidth + memTagWidth - 1, memTagWidth)
+    val rsp_data    = rsp_packed.data
 
     pb_mem_rsp_valid(b) := any_valid
     pb_mem_rsp_data(b)  := rsp_data

@@ -181,9 +181,6 @@ class CacheBank(
   val mshr_alm_full = Wire(Bool())
   cacheFlush.io.mshr_empty := mshr_empty
 
-  // These are forward-declared; driven after replay_fire / mshr_release_fire known.
-  val mshr_pending_count = RegInit(0.U((log2Ceil(mshrSize + 1) + 1).W))
-
   // =========================================================================
   // Core response queue (CRSQ)
   // VX_elastic_buffer: SIZE=CRSQ_SIZE, OUT_REG=CORE_OUT_REG
@@ -593,36 +590,17 @@ class CacheBank(
 
   val mshr_release_fire = mshr_finalize_st1 && mshr_release_st1 && !pipe_stall
 
+  val mshrPendingSize = Module(new VxPendingSize(size = mshrSize, decrw = 2))
+  mshrPendingSize.io.incr := core_req_fire.asUInt
+  mshrPendingSize.io.decr := replay_fire.asUInt + mshr_release_fire.asUInt
+  mshr_empty    := mshrPendingSize.io.empty
+  mshr_alm_full := mshrPendingSize.io.full
+
   cacheMshr.io.finalize_valid      := mshr_finalize_st1 && !pipe_stall
   cacheMshr.io.finalize_is_release := mshr_release_st1
   cacheMshr.io.finalize_is_pending := mshr_pending_st1
   cacheMshr.io.finalize_id         := mshr_id_st1
   cacheMshr.io.finalize_previd     := mshr_previd_st1
-
-  // =========================================================================
-  // MSHR pending size (VX_pending_size)
-  //
-  // SV: VX_pending_size #(.SIZE(MSHR_SIZE), .DECRW(2))
-  //     incr = core_req_fire (1-bit → adds 0 or 1)
-  //     decr = {replay_fire, mshr_release_fire} (pop-count → 0,1,2)
-  //     empty = (size == 0)
-  //     full  = (size >= SIZE)   → used as mshr_alm_full
-  //
-  // Saturating counter: clamp to [0, MSHR_SIZE].
-  // =========================================================================
-  {
-    val incr = core_req_fire.asUInt    // 0 or 1
-    val decr = PopCount(Cat(replay_fire, mshr_release_fire))  // 0,1,2
-    val maxVal = mshrSize.U
-    val next_up = mshr_pending_count +& incr
-    val next    = next_up - decr
-    // Saturate: if decr > next_up → 0; if next > mshrSize → mshrSize
-    mshr_pending_count := Mux(next_up < decr,       0.U,
-                          Mux(next > maxVal,          maxVal,
-                              next))
-  }
-  mshr_empty    := (mshr_pending_count === 0.U)
-  mshr_alm_full := (mshr_pending_count >= mshrSize.U)
 
   // =========================================================================
   // Core response scheduling

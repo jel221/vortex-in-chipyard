@@ -154,23 +154,22 @@ class VxSchedule(val coreId: Int = 0) extends Module {
   val instr_uuid  = uuidGen.io.uuid
 
   // -------------------------------------------------------------------------
-  // Output elastic buffer
-  // VX_elastic_buffer #(.DATAW(...), .SIZE(2), .OUT_REG(1)) out_buf
+  // Output queue (2-entry FIFO, registered output)
   // Packed as: {schedule_tmask, schedule_pc, schedule_wid, instr_uuid}
   // -------------------------------------------------------------------------
 
   val outBufW = NUM_THREADS + PC_BITS + NW_WIDTH + UUID_WIDTH
-  val outBuf  = Module(new VXElasticBuffer(dataw = outBufW, size = 2, outReg = 1))
 
-  outBuf.io.valid_in  := schedule_valid_w
-  schedule_ready_w    := outBuf.io.ready_in
-  outBuf.io.data_in   := Cat(schedule_tmask, schedule_pc, schedule_wid_w, instr_uuid)
-  outBuf.io.ready_out := io.schedule_ready
+  val enq = Wire(Decoupled(UInt(outBufW.W)))
+  enq.valid        := schedule_valid_w
+  enq.bits         := Cat(schedule_tmask, schedule_pc, schedule_wid_w, instr_uuid)
+  schedule_ready_w := enq.ready
 
-  io.schedule_valid := outBuf.io.valid_out
+  val deq = Queue(enq, 2)
+  deq.ready         := io.schedule_ready
+  io.schedule_valid := deq.valid
 
-  // Unpack output data
-  val outData = outBuf.io.data_out
+  val outData = deq.bits
   io.schedule_data.uuid  := outData(UUID_WIDTH - 1, 0)
   io.schedule_data.wid   := outData(UUID_WIDTH + NW_WIDTH - 1, UUID_WIDTH)
   io.schedule_data.PC    := outData(UUID_WIDTH + NW_WIDTH + PC_BITS - 1,
