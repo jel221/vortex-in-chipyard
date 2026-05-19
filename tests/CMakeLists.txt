@@ -21,7 +21,7 @@ project(chipyard-tests LANGUAGES C CXX)
 set(CMAKE_SYSTEM_NAME         "Generic" CACHE STRING "")
 set(CMAKE_SYSTEM_PROCESSOR    "riscv"   CACHE STRING "")
 
-set(TOOLCHAIN_PREFIX    "riscv64-unknown-elf-")
+set(TOOLCHAIN_PREFIX    "riscv32-unknown-elf-")
 
 set(CMAKE_AR            "${TOOLCHAIN_PREFIX}ar")
 set(CMAKE_ASM_COMPILER  "${TOOLCHAIN_PREFIX}gcc")
@@ -40,8 +40,8 @@ set(CMAKE_EXECUTABLE_SUFFIX            ".riscv")
 #################################
 
 # CPU architecture
-set(ARCH                "rv64imafd")
-set(ABI                 "lp64d")
+set(ARCH                "rv32imaf_zicsr")
+set(ABI                 "ilp32f")
 set(CMODEL              "medany")
 set(ARCH_FLAGS          -march=${ARCH} -mabi=${ABI} -mcmodel=${CMODEL})
 

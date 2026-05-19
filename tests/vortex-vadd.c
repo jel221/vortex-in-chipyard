@@ -85,6 +85,10 @@ static char stack_pool[NUM_HARTS_MAX * STACK_SIZE]     __attribute__((aligned(16
 __attribute__((naked, used))
 static void init_regs(void) {
     __asm__ (
+        ".option push\n"
+        ".option norelax\n"
+        "la   gp, __global_pointer$\n"
+        ".option pop\n"
         "csrr t0, 0xF14\n"
         "la   t1, stack_pool\n"
         "addi t2, t0, 1\n"
@@ -155,7 +159,7 @@ static void warp_stub(void) {
 __attribute__((noinline, used, section(".text.kernel")))
 static void gpu_entry(VaddArgs *_unused)
 {
-    args = vadd_args;
+    VaddArgs *args = (VaddArgs *)&vadd_args;
     uint32_t nw = (uint32_t)vx_num_warps();
     g_warp_args.args      = args;
     g_warp_args.num_tasks = args->n;

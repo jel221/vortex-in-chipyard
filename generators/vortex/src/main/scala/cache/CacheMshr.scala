@@ -125,12 +125,33 @@ class CacheMshr(
   val dequeue_val   = RegNext(dequeue_val_n,  false.B)
   val dequeue_id_r  = RegNext(dequeue_id_n,   0.U(mshrAddrWidth.W))
 
-  // ---- defaults: next = current (hold state)
-  valid_table_n := valid_table
-  next_table_x  := next_table
-  next_table_n  := next_table_x
-  dequeue_val_n := dequeue_val
-  dequeue_id_n  := dequeue_id_r
+  val allocate_fire = io.allocate_valid && allocate_rdy
+  val dequeue_fire  = dequeue_val && io.dequeue_ready
+
+  // ---- table next-values ---------------------------------------------------
+  // SV uses bit-select assignments inside always_comb so all conditions stack
+  // on independent bits. Replicate with explicit mask expressions — one per
+  // wire — matching the SV block order.
+
+  // valid_table_n: dequeue clears dequeue_id, finalize_release clears
+  // finalize_id, allocate sets allocate_id (may override a same-bit clear).
+  val vt_dequeue_clr  = Mux(dequeue_fire,
+                             UIntToOH(io.dequeue_id,    mshrSize), 0.U(mshrSize.W))
+  val vt_finalize_clr = Mux(io.finalize_valid && io.finalize_is_release,
+                             UIntToOH(io.finalize_id,   mshrSize), 0.U(mshrSize.W))
+  val vt_allocate_set = Mux(allocate_fire,
+                             UIntToOH(allocate_id_r,    mshrSize), 0.U(mshrSize.W))
+  valid_table_n := (valid_table & ~(vt_dequeue_clr | vt_finalize_clr)) | vt_allocate_set
+
+  // next_table_x: finalize_pending sets finalize_previd bit.
+  val ntx_finalize_set = Mux(io.finalize_valid && io.finalize_is_pending,
+                              UIntToOH(io.finalize_previd, mshrSize), 0.U(mshrSize.W))
+  next_table_x := next_table | ntx_finalize_set
+
+  // next_table_n: allocate clears allocate_id bit.
+  val ntn_allocate_clr = Mux(allocate_fire,
+                              UIntToOH(allocate_id_r, mshrSize), 0.U(mshrSize.W))
+  next_table_n := next_table_x & ~ntn_allocate_clr
 
   // ---- address-match vector ------------------------------------------------
   val addr_matches = VecInit((0 until mshrSize).map { i =>
@@ -140,19 +161,18 @@ class CacheMshr(
   val tail_candidates = addr_matches & ~next_table_x
   val prev_idx        = PriorityEncoder(tail_candidates)
 
-  val allocate_fire = io.allocate_valid && allocate_rdy
-  val dequeue_fire  = dequeue_val && io.dequeue_ready
+  // ---- dequeue_val/id: sequential when-blocks match SV always_comb order --
+  dequeue_val_n := dequeue_val
+  dequeue_id_n  := dequeue_id_r
 
-  // SV combinational block order:
-  // 1) fill_valid → set dequeue_val_n, dequeue_id_n
+  // 1) fill_valid → arm replay
   when (io.fill_valid) {
     dequeue_val_n := true.B
     dequeue_id_n  := io.fill_id
   }
 
-  // 2) dequeue_fire → clear valid bit, advance chain
+  // 2) dequeue_fire → advance chain (fires after fill_valid, matching SV order)
   when (dequeue_fire) {
-    valid_table_n := valid_table & ~UIntToOH(io.dequeue_id, mshrSize)
     when (next_table(io.dequeue_id)) {
       dequeue_id_n := next_index(io.dequeue_id)
     } .elsewhen (io.finalize_valid && io.finalize_is_pending &&
@@ -161,24 +181,6 @@ class CacheMshr(
     } .otherwise {
       dequeue_val_n := false.B
     }
-  }
-
-  // 3) finalize_valid
-  when (io.finalize_valid) {
-    when (io.finalize_is_release) {
-      valid_table_n := valid_table & ~UIntToOH(io.finalize_id, mshrSize)
-    }
-    // next_table_x is set unconditionally for finalize_is_pending to reduce
-    // timing; wrong updates are cleared by allocate_fire below.
-    when (io.finalize_is_pending) {
-      next_table_x := next_table | UIntToOH(io.finalize_previd, mshrSize)
-    }
-  }
-
-  // 4) allocate_fire → override next_table_n and valid_table_n
-  when (allocate_fire) {
-    valid_table_n := valid_table | UIntToOH(allocate_id_r, mshrSize)
-    next_table_n  := next_table_x & ~UIntToOH(allocate_id_r, mshrSize)
   }
 
   when (allocate_fire) {

@@ -6,6 +6,7 @@ import freechips.rocketchip.subsystem.{InCluster, SubsystemBankedCoherenceKey, B
 
 class VortexRocketConfig extends Config(
   new vortex.WithVortexRoCC ++
+  new freechips.rocketchip.rocket.WithRV32 ++
   new freechips.rocketchip.rocket.WithCFlushEnabled ++
   new freechips.rocketchip.rocket.WithNSmallCores(1) ++
   // Replace InclusiveCache (L2) with the default broadcast manager so the
